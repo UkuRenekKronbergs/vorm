@@ -110,6 +110,8 @@ scripts/
 └── validate.py                   # CLI: PROJECT_PLAN §4 valideerimisharness
 docs/
 ├── interview_script.md           # §4.4 kvalitatiivse intervjuu protokoll
+├── supabase_auth_email_templates.md   # Supabase Auth emailide eestikeelsed mallid
+├── supabase_auth_email_templates.json # Sama Management API payloadina
 └── supabase_schema.sql           # Supabase DDL + RLS poliitikad (jooksuta Dashboardis)
 ```
 
@@ -237,7 +239,7 @@ Vaikimisi käivitub rakendus **anonüümses ühe-kasutaja režiimis** lokaalse S
 
 - **Sisselogimine** email + parooliga. Esmakordsel registreerumisel saadab Supabase kinnitusmaili — pärast lingile klikkimist pole kinnitamist enam vaja, ainult email + parool.
 - **Parooli taastamine** on login-väravas eraldi tabina olemas. Kasutaja saab taastamislingi emailile, avab lingi ja määrab uue parooli samas Streamlit rakenduses.
-- **Brauseri refresh ei logi välja.** Rakendus paneb brauserisse oma `vorm_session` cookie, kus on ainult juhuslik sessiooni-ID; Supabase tokenid jäävad serveripoole registrisse ja sessioon taastatakse refresh-tokeniga. Serveri restart/redeploy nõuab uuesti sisselogimist.
+- **Brauseri refresh ei logi välja.** Rakendus hoiab brauseri URL-is ainult juhuslikku sessiooni-ID-d (`?s=...`); Supabase tokenid jäävad serveripoole registrisse ja sessioon taastatakse refresh-tokeniga. Serveri restart/redeploy nõuab uuesti sisselogimist.
 - **Sportlase profiil**, **päevalogi** ja **Strava ühendus** salvestuvad pilve — säilivad redeploy'de vahel, näha igast seadmest. Profiil **salvestub automaatselt** kui väärtusi muudad.
 - **Row-Level Security** — iga kasutaja näeb ainult enda andmeid; PostgreSQL võtab vastutuse, mitte rakenduse-kood.
 - **Strava-vahemälu** jääb endiselt lokaalseks SQLite'iks, aga cache-fail on kasutaja/ühenduse järgi eristatud.
@@ -248,14 +250,15 @@ Vaikimisi käivitub rakendus **anonüümses ühe-kasutaja režiimis** lokaalse S
 2. **Loo skeem** — Dashboard → SQL Editor → New query → kleebi [`docs/supabase_schema.sql`](docs/supabase_schema.sql) → Run. Loob tabelid `athlete_profiles` + `daily_logs` koos RLS-poliitikatega.
 3. **Võta võtmed** — Settings → API → kopeeri `Project URL` ja `anon` / `publishable` võti. **Ära kasuta** `service_role` / `secret` võtit — see läbib RLS-i ja on admin-võti, mida rakendus ei vaja.
 4. **Confirm email** — Authentication → Sign In / Providers → Email → veendu, et **"Confirm email" on ON** (vaikimisi nii). Nii saab kasutaja esmaregistreerumisel kinnitusmaili; pärast kinnitamist piisab edaspidi ainult email + parool.
-5. **Email template** (valikuline) — Authentication → Email Templates → "Confirm signup" ja "Reset password" — saad kohandada eesti keelde. Vaikimisi template töötab.
-6. **Site URL** — Authentication → URL Configuration → Site URL = `http://localhost:8501` (lokaalseks arenduseks) või `https://your-app.streamlit.app` (cloud). Kinnitus- ja parooli taastamise lingile klikkides suunab Supabase siia tagasi.
-7. **Konfigureeri** — lisa `.env`-i (lokaalne) või Streamlit Secrets'i (cloud):
+5. **Email template eesti keelde** — Authentication → Email Templates → "Confirm signup" ja "Reset password". Valmis mallid on failis [`docs/supabase_auth_email_templates.md`](docs/supabase_auth_email_templates.md); Management API payload on failis [`docs/supabase_auth_email_templates.json`](docs/supabase_auth_email_templates.json). Uutele kasutajatele läheb signup metadata sisse `language = "et"`, nii et sama template'i saab hiljem mitmekeelseks teha.
+6. **Custom SMTP** (soovitatav väljaspool demot) — Authentication → Settings → SMTP Settings. Supabase vaikimisi emailiserver sobib testimiseks, aga tootmises/demos võib rate-limit või lubatud aadresside piirang segada kinnitus- ja taastamiskirju.
+7. **Site URL** — Authentication → URL Configuration → Site URL = `http://localhost:8501` (lokaalseks arenduseks) või `https://your-app.streamlit.app` (cloud). Kinnitus- ja parooli taastamise lingile klikkides suunab Supabase siia tagasi.
+8. **Konfigureeri** — lisa `.env`-i (lokaalne) või Streamlit Secrets'i (cloud):
    ```toml
    SUPABASE_URL = "https://xxxxx.supabase.co"
    SUPABASE_ANON_KEY = "sb_publishable_..."     # või vanem JWT-vormingus anon-võti
    ```
-8. **Käivita** rakendus — login-värav ilmub automaatselt, kui mõlemad võtmed on olemas. Tabid: **Logi sisse**, **Loo uus konto** ja **Taasta parool**.
+9. **Käivita** rakendus — login-värav ilmub automaatselt, kui mõlemad võtmed on olemas. Tabid: **Logi sisse**, **Loo uus konto** ja **Taasta parool**.
 
 ### Anonüümse režiimi tagasi lülitamine
 

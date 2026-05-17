@@ -126,7 +126,9 @@ def test_sign_up_passes_role_in_metadata(monkeypatch):
 
     assert captured["email"] == "athlete@example.com"
     assert captured["password"] == "secret123"
-    assert captured["options"] == {"data": {"requested_role": "coach"}}
+    assert captured["options"] == {
+        "data": {"requested_role": "coach", "language": "et"}
+    }
 
 
 def test_sign_up_defaults_to_athlete(monkeypatch):
@@ -144,4 +146,7 @@ def test_sign_up_defaults_to_athlete(monkeypatch):
 
     auth.sign_up("a@b.c", "secret123")
 
-    assert captured["options"]["data"] == {"requested_role": "athlete"}
+    assert captured["options"]["data"] == {
+        "requested_role": "athlete",
+        "language": "et",
+    }

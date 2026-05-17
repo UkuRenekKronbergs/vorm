@@ -413,6 +413,7 @@ def render_athlete_coach_panel(athlete_store: SupabaseStore) -> None:
                 "saata otsuseid §4.2 pimemenetluses. Tema **ei** näe "
                 "sinu Strava-ühendust ega toorpulsi-andmeid."
             )
+        _render_sidebar_latest_coach_decision(athlete_store)
     else:
         st.sidebar.caption(
             "Sa pole ühegi treeneriga seotud. Kui treener andis sulle "
@@ -450,6 +451,22 @@ def render_athlete_coach_panel(athlete_store: SupabaseStore) -> None:
                 return
             st.success("Treener seotud!")
             st.rerun()
+
+
+def _render_sidebar_latest_coach_decision(athlete_store: SupabaseStore) -> None:
+    try:
+        decisions = athlete_store.list_coach_decisions(
+            since=date.today() - timedelta(days=14),
+        )
+    except Exception:
+        return
+    if not decisions:
+        return
+    latest = max(decisions, key=lambda d: d.decision_date)
+    st.sidebar.info(
+        f"Viimane treeneri otsus ({latest.decision_date.isoformat()}): "
+        f"**{latest.recommended_category}**"
+    )
 
 
 def _read_coach_display_name(athlete_store: SupabaseStore, coach_user_id: str) -> str:

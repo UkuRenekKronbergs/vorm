@@ -72,6 +72,7 @@ _AUTH_QUERY_KEYS = (
     "type",
 )
 _PERSIST_TTL_SECONDS = 60 * 60 * 24 * 14
+_DEFAULT_AUTH_EMAIL_LANGUAGE = "et"
 
 
 @dataclass(frozen=True)
@@ -434,7 +435,12 @@ def sign_up(email: str, password: str, role: str = "athlete") -> bool:
     client.auth.sign_up({
         "email": email,
         "password": password,
-        "options": {"data": {"requested_role": role}},
+        "options": {
+            "data": {
+                "requested_role": role,
+                "language": _DEFAULT_AUTH_EMAIL_LANGUAGE,
+            }
+        },
     })
     return True
 

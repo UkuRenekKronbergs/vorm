@@ -544,6 +544,61 @@ def _render_verdict_box(verdict, llm_result=None):
         st.caption(meta)
 
 
+def _render_coach_decision_card(decision: CoachDecision) -> None:
+    """Athlete-facing display for one coach decision."""
+    with st.container(border=True):
+        meta_cols = st.columns([3, 1])
+        meta_cols[0].caption(f"Treeneri otsus - {decision.coach_name}")
+        meta_cols[1].caption(decision.decision_date.isoformat())
+        st.markdown(f"### {decision.recommended_category}")
+        if decision.rationale:
+            st.markdown(f"**Põhjendus:** {decision.rationale}")
+        if decision.notes:
+            st.caption(f"Märkused: {decision.notes}")
+
+
+def _coach_decision_table_rows(
+    decisions: list[CoachDecision],
+    log_by_date: dict[date, DailyLogEntry] | None = None,
+) -> list[dict[str, str]]:
+    rows = []
+    log_by_date = log_by_date or {}
+    for decision in sorted(decisions, key=lambda d: d.decision_date, reverse=True):
+        log = log_by_date.get(decision.decision_date)
+        row = {
+            "Kuupäev": decision.decision_date.isoformat(),
+            "Treener": decision.coach_name,
+            "Otsus": decision.recommended_category,
+            "Põhjendus": decision.rationale or "",
+            "Märkused": decision.notes or "",
+            "Mudeli soovitus": "",
+            "Kattuvus": "",
+        }
+        if log is not None:
+            row["Mudeli soovitus"] = log.recommended_category
+            row["Kattuvus"] = _agreement_bucket(
+                log.recommended_category,
+                decision.recommended_category,
+            )
+        rows.append(row)
+    return rows
+
+
+@st.fragment(run_every="30s")
+def _render_live_coach_decision_for_day(store, day: date) -> None:
+    """Poll the athlete's own coach_decisions row so coach saves surface live."""
+    if store is None:
+        return
+    try:
+        decision = store.get_coach_decision(day)
+    except Exception as exc:
+        st.warning(f"Treeneri otsuse laadimine ebaõnnestus: {exc}")
+        return
+    if decision is None:
+        return
+    _render_coach_decision_card(decision)
+
+
 def _render_safety_flags(verdict):
     if not verdict.flags:
         st.success("Ohutusreeglid: kõik korras — kriitilisi ega hoiatusi pole.")
@@ -929,10 +984,11 @@ if auth_user or auth.is_guest():
 # Athlete-side coach link panel: lets athletes paste a coach's invite code
 # and see which coach(es) are currently linked. Only renders for signed-in
 # athletes (coaches have their own dashboard; guests / anon mode skip).
+athlete_coach_store = None
 if auth_user and not auth.is_guest():
-    _athlete_store = auth.get_store()
-    if _athlete_store is not None:
-        render_athlete_coach_panel(_athlete_store)
+    athlete_coach_store = auth.get_store()
+    if athlete_coach_store is not None:
+        render_athlete_coach_panel(athlete_coach_store)
         st.sidebar.divider()
 
 _consume_strava_oauth_callback()
@@ -1094,6 +1150,8 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
 # --- Tab 1: today's recommendation
 with tab1:
     st.subheader(f"Analüüsi seisuga {analysis_date.isoformat()}")
+    if athlete_coach_store is not None:
+        _render_live_coach_decision_for_day(athlete_coach_store, analysis_date)
 
     summary = current_summary
 
@@ -1711,6 +1769,7 @@ with tab7:
     # If the athlete is linked to coaches, tell them their coach can enter
     # decisions directly — the local form is then a fallback for in-person
     # interview transcription (or when the coach isn't on Vorm.ai).
+    linked_coach_names = []
     if coach_store is not None and auth_user and not auth.is_guest():
         try:
             linked_coach_names = list_linked_coach_names(coach_store)
@@ -1730,8 +1789,28 @@ with tab7:
     except Exception:
         existing_decisions = []
 
+    log_by_date = {e.log_date: e for e in existing_logs}
+    if existing_decisions:
+        st.markdown("#### Treeneri otsused")
+        st.dataframe(
+            pd.DataFrame(_coach_decision_table_rows(existing_decisions, log_by_date)),
+            hide_index=True,
+            width="stretch",
+        )
+        latest = max(existing_decisions, key=lambda d: d.decision_date)
+        if latest.decision_date >= date.today() - timedelta(days=7):
+            _render_coach_decision_card(latest)
+
     # --- Entry form
-    with st.expander("➕ Sisesta treeneri otsus", expanded=not existing_decisions):
+    manual_form_label = (
+        "➕ Manuaalne varuvariant: sisesta treeneri otsus"
+        if linked_coach_names
+        else "➕ Sisesta treeneri otsus"
+    )
+    with st.expander(
+        manual_form_label,
+        expanded=not existing_decisions and not linked_coach_names,
+    ):
         log_dates = sorted({e.log_date for e in existing_logs}, reverse=True)
         if not log_dates:
             st.info(
@@ -1815,7 +1894,6 @@ with tab7:
             "kattuvuse arvutus tekib kohe, kui mõlemad pooled on olemas."
         )
     else:
-        log_by_date = {e.log_date: e for e in existing_logs}
         pairs = []
         for d in existing_decisions:
             log = log_by_date.get(d.decision_date)
