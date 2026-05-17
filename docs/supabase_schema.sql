@@ -3,7 +3,7 @@
 -- Käivita see üks kord:
 --   Supabase Dashboard → SQL Editor → New query → kleebi sisu → Run.
 --
--- Loob kuus kasutaja-skoobiga tabelit:
+-- Loob kuus kasutaja-skoobiga tabelit ja kutsekoodi aktsepteerimise RPC:
 --   - user_roles          — sportlane vs treener (üks rida per kasutaja)
 --   - coach_athlete_links — treener ↔ sportlane seos (kutsekoodiga)
 --   - athlete_profiles    — sportlase profiil (üks rida per sportlane)
@@ -16,6 +16,8 @@
 -- ja coach_decisions ridu (read + kirjuta coach_decisions-i jaoks).
 --
 -- Skript on idempotentne — võid uuesti käivitada, ilma andmeid kaotamata.
+
+GRANT USAGE ON SCHEMA public TO authenticated;
 
 -- ===== user_roles ====================================================
 -- Iga konto on kas 'athlete' (sportlane) või 'coach' (treener).
@@ -33,6 +35,7 @@ CREATE TABLE IF NOT EXISTS public.user_roles (
 );
 
 ALTER TABLE public.user_roles ENABLE ROW LEVEL SECURITY;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.user_roles TO authenticated;
 
 DROP POLICY IF EXISTS "Users select own role" ON public.user_roles;
 DROP POLICY IF EXISTS "Users insert own role" ON public.user_roles;
@@ -63,8 +66,8 @@ ON CONFLICT (user_id) DO NOTHING;
 
 -- ===== coach_athlete_links ============================================
 -- Treener loob kutsekoodi (athlete_user_id = NULL, status = 'pending').
--- Sportlane sisestab koodi → row uuendub: athlete_user_id = tema id,
--- status = 'active'. Üks (treener, sportlane) paar on unikaalne, aga
+-- Sportlane sisestab koodi → public.accept_coach_invite(...) uuendab rea:
+-- athlete_user_id = tema id, status = 'active'. Üks (treener, sportlane) paar on unikaalne, aga
 -- sportlasel võib olla mitu treenerit ja vastupidi.
 CREATE TABLE IF NOT EXISTS public.coach_athlete_links (
     id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -83,6 +86,7 @@ CREATE INDEX IF NOT EXISTS idx_links_coach ON public.coach_athlete_links (coach_
 CREATE INDEX IF NOT EXISTS idx_links_athlete ON public.coach_athlete_links (athlete_user_id);
 
 ALTER TABLE public.coach_athlete_links ENABLE ROW LEVEL SECURITY;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.coach_athlete_links TO authenticated;
 
 DROP POLICY IF EXISTS "Links select coach side" ON public.coach_athlete_links;
 DROP POLICY IF EXISTS "Links select athlete side" ON public.coach_athlete_links;
@@ -101,13 +105,10 @@ CREATE POLICY "Links select athlete side" ON public.coach_athlete_links
 -- Treener loob seose (athlete_user_id = NULL invite-vormis).
 CREATE POLICY "Links insert by coach" ON public.coach_athlete_links
     FOR INSERT WITH CHECK (auth.uid() = coach_user_id);
--- Sportlane aktsepteerib kutset: USING-kontroll filtreerib ridu, mida ta
--- üldse 'näha' tohib (pending + vaba); WITH CHECK kindlustab, et ta saab
--- ainult enda id-le linkida ja 'active'-staatusesse viia.
-CREATE POLICY "Links accept by athlete" ON public.coach_athlete_links
-    FOR UPDATE
-    USING (status = 'pending' AND athlete_user_id IS NULL)
-    WITH CHECK (athlete_user_id = auth.uid() AND status = 'active');
+-- Sportlane EI saa pending-kutseridu otse SELECT-ida/UPDATE-ida: Postgres RLS
+-- nõuaks UPDATE jaoks ka SELECT-poliitikat ja see lekiks kasutamata kutsekoodid.
+-- Koodi aktsepteerimine käib allpool defineeritud public.accept_coach_invite(...)
+-- RPC kaudu.
 -- Treener saab oma seose tühistada (status='revoked') või kustutada.
 CREATE POLICY "Links update by coach" ON public.coach_athlete_links
     FOR UPDATE USING (auth.uid() = coach_user_id)
@@ -116,13 +117,20 @@ CREATE POLICY "Links delete by coach" ON public.coach_athlete_links
     FOR DELETE USING (auth.uid() = coach_user_id);
 
 
--- ===== is_active_coach_of() ===========================================
+-- ===== private helperid + kutse RPC ====================================
+-- SECURITY DEFINER helperid elavad private skeemis, mitte public Data API
+-- skeemis. Publicus on ainult õhuke security-invoker RPC wrapper, mida
+-- Streamlit klient saab kutsuda.
+CREATE SCHEMA IF NOT EXISTS private;
+REVOKE ALL ON SCHEMA private FROM PUBLIC;
+GRANT USAGE ON SCHEMA private TO authenticated;
+
 -- Helper: tagastab TRUE, kui auth.uid() on aktiivne treener antud
 -- sportlasele. Kasutame seda teiste tabelite RLS-poliisides, et treener
 -- näeks ainult seotud sportlaste andmeid. SECURITY DEFINER on vajalik,
 -- sest muidu coach_athlete_links-i enda RLS blokeeriks lookup'i, kui
 -- seda kasutatakse teise tabeli policy-kontekstis.
-CREATE OR REPLACE FUNCTION public.is_active_coach_of(p_athlete_user_id UUID)
+CREATE OR REPLACE FUNCTION private.is_active_coach_of(p_athlete_user_id UUID)
 RETURNS BOOLEAN
 LANGUAGE SQL
 SECURITY DEFINER
@@ -136,7 +144,59 @@ AS $$
     );
 $$;
 
-GRANT EXECUTE ON FUNCTION public.is_active_coach_of(UUID) TO authenticated;
+REVOKE ALL ON FUNCTION private.is_active_coach_of(UUID) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION private.is_active_coach_of(UUID) TO authenticated;
+
+-- Sportlane aktsepteerib kutsekoodi. See on RPC, mitte tabeli otse-UPDATE,
+-- sest pending invite'i SELECT-poliitika lekiks kõik kasutamata koodid.
+CREATE OR REPLACE FUNCTION private.accept_coach_invite(p_invite_code TEXT)
+RETURNS SETOF public.coach_athlete_links
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    v_actor UUID := auth.uid();
+    v_cleaned TEXT := upper(btrim(coalesce(p_invite_code, '')));
+BEGIN
+    IF v_actor IS NULL OR v_cleaned = '' THEN
+        RETURN;
+    END IF;
+
+    RETURN QUERY
+    UPDATE public.coach_athlete_links AS link
+       SET athlete_user_id = v_actor,
+           status = 'active',
+           accepted_at = now()
+     WHERE link.invite_code = v_cleaned
+       AND link.status = 'pending'
+       AND link.athlete_user_id IS NULL
+       AND link.coach_user_id <> v_actor
+       AND NOT EXISTS (
+           SELECT 1
+             FROM public.coach_athlete_links AS existing
+            WHERE existing.coach_user_id = link.coach_user_id
+              AND existing.athlete_user_id = v_actor
+              AND existing.status = 'active'
+       )
+     RETURNING link.*;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION private.accept_coach_invite(TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION private.accept_coach_invite(TEXT) TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.accept_coach_invite(p_invite_code TEXT)
+RETURNS SETOF public.coach_athlete_links
+LANGUAGE SQL
+SECURITY INVOKER
+SET search_path = public, pg_temp
+AS $$
+    SELECT * FROM private.accept_coach_invite(p_invite_code);
+$$;
+
+REVOKE ALL ON FUNCTION public.accept_coach_invite(TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.accept_coach_invite(TEXT) TO authenticated;
 
 
 -- ===== user_roles ristkooslased poliisid =============================
@@ -161,7 +221,7 @@ CREATE POLICY "Athletes select coach role" ON public.user_roles
 -- juba olemasolevat is_active_coach_of() helperit).
 DROP POLICY IF EXISTS "Coaches select athlete role" ON public.user_roles;
 CREATE POLICY "Coaches select athlete role" ON public.user_roles
-    FOR SELECT USING (public.is_active_coach_of(user_id));
+    FOR SELECT USING (private.is_active_coach_of(user_id));
 
 
 -- ===== athlete_profiles ==============================================
@@ -183,6 +243,7 @@ CREATE TABLE IF NOT EXISTS public.athlete_profiles (
 );
 
 ALTER TABLE public.athlete_profiles ENABLE ROW LEVEL SECURITY;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.athlete_profiles TO authenticated;
 
 DROP POLICY IF EXISTS "Users select own profile" ON public.athlete_profiles;
 DROP POLICY IF EXISTS "Users insert own profile" ON public.athlete_profiles;
@@ -202,7 +263,7 @@ CREATE POLICY "Users delete own profile" ON public.athlete_profiles
 -- Treener näeb seotud sportlase profiili (read-only).
 DROP POLICY IF EXISTS "Coaches select linked athlete profile" ON public.athlete_profiles;
 CREATE POLICY "Coaches select linked athlete profile" ON public.athlete_profiles
-    FOR SELECT USING (public.is_active_coach_of(user_id));
+    FOR SELECT USING (private.is_active_coach_of(user_id));
 
 -- Hoia updated_at jooksvalt värske.
 CREATE OR REPLACE FUNCTION public.tg_set_updated_at()
@@ -240,6 +301,7 @@ CREATE TABLE IF NOT EXISTS public.strava_connections (
 );
 
 ALTER TABLE public.strava_connections ENABLE ROW LEVEL SECURITY;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.strava_connections TO authenticated;
 
 DROP POLICY IF EXISTS "Users select own Strava connection" ON public.strava_connections;
 DROP POLICY IF EXISTS "Users insert own Strava connection" ON public.strava_connections;
@@ -283,6 +345,7 @@ CREATE INDEX IF NOT EXISTS idx_daily_logs_user_date
     ON public.daily_logs (user_id, log_date DESC);
 
 ALTER TABLE public.daily_logs ENABLE ROW LEVEL SECURITY;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.daily_logs TO authenticated;
 
 DROP POLICY IF EXISTS "Users select own logs" ON public.daily_logs;
 DROP POLICY IF EXISTS "Users insert own logs" ON public.daily_logs;
@@ -302,7 +365,7 @@ CREATE POLICY "Users delete own logs" ON public.daily_logs
 -- Treener näeb seotud sportlase päevalogi (read-only).
 DROP POLICY IF EXISTS "Coaches select linked athlete logs" ON public.daily_logs;
 CREATE POLICY "Coaches select linked athlete logs" ON public.daily_logs
-    FOR SELECT USING (public.is_active_coach_of(user_id));
+    FOR SELECT USING (private.is_active_coach_of(user_id));
 
 
 -- ===== coach_decisions ================================================
@@ -326,6 +389,7 @@ CREATE INDEX IF NOT EXISTS idx_coach_decisions_user_date
     ON public.coach_decisions (user_id, decision_date DESC);
 
 ALTER TABLE public.coach_decisions ENABLE ROW LEVEL SECURITY;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.coach_decisions TO authenticated;
 
 DROP POLICY IF EXISTS "Users select own coach decisions" ON public.coach_decisions;
 DROP POLICY IF EXISTS "Users insert own coach decisions" ON public.coach_decisions;
@@ -350,11 +414,16 @@ DROP POLICY IF EXISTS "Coaches insert linked athlete decisions" ON public.coach_
 DROP POLICY IF EXISTS "Coaches update linked athlete decisions" ON public.coach_decisions;
 DROP POLICY IF EXISTS "Coaches delete linked athlete decisions" ON public.coach_decisions;
 CREATE POLICY "Coaches select linked athlete decisions" ON public.coach_decisions
-    FOR SELECT USING (public.is_active_coach_of(user_id));
+    FOR SELECT USING (private.is_active_coach_of(user_id));
 CREATE POLICY "Coaches insert linked athlete decisions" ON public.coach_decisions
-    FOR INSERT WITH CHECK (public.is_active_coach_of(user_id));
+    FOR INSERT WITH CHECK (private.is_active_coach_of(user_id));
 CREATE POLICY "Coaches update linked athlete decisions" ON public.coach_decisions
-    FOR UPDATE USING (public.is_active_coach_of(user_id))
-                WITH CHECK (public.is_active_coach_of(user_id));
+    FOR UPDATE USING (private.is_active_coach_of(user_id))
+                WITH CHECK (private.is_active_coach_of(user_id));
 CREATE POLICY "Coaches delete linked athlete decisions" ON public.coach_decisions
-    FOR DELETE USING (public.is_active_coach_of(user_id));
+    FOR DELETE USING (private.is_active_coach_of(user_id));
+
+-- Vanemates skeemi versioonides oli SECURITY DEFINER helper public skeemis.
+-- Kõik poliitikad kasutavad nüüd private.is_active_coach_of(...), nii et vana
+-- public-funktsiooni võib turvaliselt eemaldada.
+DROP FUNCTION IF EXISTS public.is_active_coach_of(UUID);

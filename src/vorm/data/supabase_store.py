@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import secrets
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
 from .models import AthleteProfile, CoachAthleteLink, StravaConnection, UserRole
@@ -325,26 +325,31 @@ class SupabaseStore:
     def accept_invite(self, code: str) -> CoachAthleteLink:
         """Athlete claims a coach's pending invite code.
 
-        Updates the matching pending row in-place. RLS enforces:
-        - row must be `pending` with NULL athlete_user_id (otherwise the
-          UPDATE matches no rows)
-        - new athlete_user_id must equal auth.uid()
+        This goes through a small Supabase RPC instead of a direct table
+        UPDATE. Postgres RLS requires an UPDATE target row to also be visible
+        through a SELECT policy; making all pending invite rows SELECT-able
+        would leak unused invite codes. The RPC validates the code server-side
+        and returns only the claimed row.
         """
         cleaned = (code or "").strip().upper()
         if not cleaned:
             raise ValueError("Kutsekood on kohustuslik.")
-        resp = (
-            self.client.table("coach_athlete_links")
-            .update({
-                "athlete_user_id": self.user_id,
-                "status": "active",
-                "accepted_at": datetime.now(UTC).isoformat(),
-            })
-            .eq("invite_code", cleaned)
-            .eq("status", "pending")
-            .is_("athlete_user_id", "null")
-            .execute()
-        )
+        try:
+            resp = (
+                self.client.rpc(
+                    "accept_coach_invite",
+                    {"p_invite_code": cleaned},
+                )
+                .execute()
+            )
+        except Exception as exc:
+            message = str(exc)
+            if "accept_coach_invite" in message or "function" in message.lower():
+                raise RuntimeError(
+                    "Supabase skeem vajab uuendamist: käivita "
+                    "docs/supabase_schema.sql SQL Editoris uuesti."
+                ) from exc
+            raise
         rows = resp.data or []
         if not rows:
             raise LookupError(

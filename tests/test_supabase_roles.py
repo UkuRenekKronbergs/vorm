@@ -8,6 +8,7 @@ regressions in the typed boundaries.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -155,25 +156,21 @@ def test_accept_invite_rejects_empty_code(bad):
 def test_accept_invite_raises_lookup_error_when_no_row_matches():
     """No matching pending row → tell the athlete the code is invalid."""
     client = MagicMock()
-    update_chain = (
-        client.table.return_value
-        .update.return_value
-        .eq.return_value.eq.return_value.is_.return_value
-    )
-    update_chain.execute.return_value = MagicMock(data=[])  # 0 rows matched
+    client.rpc.return_value.execute.return_value = MagicMock(data=[])  # 0 rows matched
     store = SupabaseStore(client=client, user_id="athlete-1")
 
     with pytest.raises(LookupError, match="ei kehti"):
         store.accept_invite("BADCODE1")
+    client.rpc.assert_called_once_with(
+        "accept_coach_invite",
+        {"p_invite_code": "BADCODE1"},
+    )
 
 
 def test_accept_invite_uppercases_input_before_lookup():
     """Codes are stored in uppercase; lowercase input shouldn't miss them."""
     client = MagicMock()
-    update_call = client.table.return_value.update
-    eq_after_update = update_call.return_value.eq
-    eq_chain = eq_after_update.return_value.eq.return_value.is_
-    eq_chain.return_value.execute.return_value = MagicMock(data=[{
+    client.rpc.return_value.execute.return_value = MagicMock(data=[{
         "id": "link-1",
         "coach_user_id": "coach-1",
         "athlete_user_id": "athlete-1",
@@ -187,6 +184,30 @@ def test_accept_invite_uppercases_input_before_lookup():
     link = store.accept_invite("  abcdefgh  ")
 
     assert link.status == "active"
-    # The first .eq() in the chain narrows by invite_code — confirm it received uppercase.
-    invite_eq_call = eq_after_update.call_args
-    assert invite_eq_call[0] == ("invite_code", "ABCDEFGH")
+    client.rpc.assert_called_once_with(
+        "accept_coach_invite",
+        {"p_invite_code": "ABCDEFGH"},
+    )
+
+
+def test_accept_invite_explains_missing_schema_rpc():
+    client = MagicMock()
+    client.rpc.return_value.execute.side_effect = Exception(
+        "Could not find the function public.accept_coach_invite"
+    )
+    store = SupabaseStore(client=client, user_id="athlete-1")
+
+    with pytest.raises(RuntimeError, match="Supabase skeem vajab uuendamist"):
+        store.accept_invite("ABCDEFGH")
+
+
+def test_accept_invite_has_schema_rpc_without_pending_select_policy():
+    """The SQL schema should claim invites by RPC, not by exposing all pending codes."""
+    schema = (
+        Path(__file__).resolve().parents[1] / "docs" / "supabase_schema.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "CREATE OR REPLACE FUNCTION private.accept_coach_invite" in schema
+    assert "CREATE OR REPLACE FUNCTION public.accept_coach_invite" in schema
+    assert 'CREATE POLICY "Links select pending by code"' not in schema
+    assert 'CREATE POLICY "Links accept by athlete"' not in schema
