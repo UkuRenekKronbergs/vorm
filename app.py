@@ -539,7 +539,7 @@ def _render_verdict_box(verdict, llm_result=None):
           <div style="font-size: 15px; line-height: 1.45; color: #222;">
             {(llm_result.rationale if llm_result else "Reeglipõhine soovitus — lisa API võti detailse põhjenduse saamiseks.")}
           </div>
-          {"<div style='margin-top: 10px; font-size: 14px; color: #444;'><b>Asendus:</b> " + llm_result.modification + "</div>" if (llm_result and llm_result.modification) else ""}
+          {"<div style='margin-top: 10px; font-size: 14px; color: #444;'><b>Treeningkava:</b> " + llm_result.modification + "</div>" if (llm_result and llm_result.modification) else ""}
         </div>
         """,
         unsafe_allow_html=True,

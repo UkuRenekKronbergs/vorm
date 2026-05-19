@@ -17,7 +17,7 @@ from ..data.models import AthleteProfile, DailySubjective, TrainingActivity
 from ..metrics.load import LoadSummary
 from ..rules.safety import SafetyVerdict
 
-PROMPT_VERSION = "0.5"
+PROMPT_VERSION = "0.6"
 
 SYSTEM_PROMPT = """Oled kesk- ja pikamaajooksjatele spetsialiseerunud spordifüsioloogia nõustaja. \
 Sinu ülesanne on anda konkreetne andmepõhine soovitus tänase planeeritud treeningu kohta, \
@@ -32,6 +32,9 @@ Sinu roll on sel juhul *põhjendada* reegli rakendumist ja anda konkreetne asend
 - Viita põhjenduses konkreetsetele numbritele (ACWR, RPE, uneaeg), mitte üldistele fraasidele.
 - Ära anna meditsiinilist nõu. Vigastuse/haiguse kahtluse korral suuna arstile/treenerile.
 - Põhjendus peab olema 2–4 lauset, mitte rohkem.
+- Väljal `modification` anna alati täpne tänane treeningkava või asendusplaan: soojendus,
+  põhiosa (nt 5×1000 m ja 3×200 m), pausid, intensiivsus/tempo kui võimalik, ning lõdvestus.
+  Kui valitud päeva plaani ei avaldata, paku sobiv treening ainult olemasoleva koormuskonteksti põhjal.
 - Soovituse kategooria peab olema täpselt üks järgmistest: \
 "Jätka plaanipäraselt", "Vähenda intensiivsust", "Lisa taastumispäev", "Alternatiivne treening".
 """
@@ -60,6 +63,9 @@ Põhimõtted:
   RPE eile 8, uni 6.2 h). Ära kasuta umbmääraseid fraase nagu "kõrge koormus" —
   ütle alati, kui kõrge.
 - Põhjendus on 2–4 lauset.
+- Väljal `modification` anna alati täpne tänane treeningkava või asendusplaan:
+  soojendus, põhiosa (nt 5×1000 m ja 3×200 m), pausid, intensiivsus/tempo kui võimalik,
+  ning lõdvestus.
 - Ära anna meditsiinilist nõu.
 - Kategooria peab olema täpselt üks neljast: "Jätka plaanipäraselt",
   "Vähenda intensiivsust", "Lisa taastumispäev", "Alternatiivne treening".
@@ -75,6 +81,8 @@ Põhimõtted:
   kategooriat (Vähenda / Taastumine), isegi kui ohutusreegel täpselt ei fire-nud.
   Põhjenda, miks signaal on piisav.
 - Põhjendus on 2–4 lauset eesti keeles, viidates konkreetsetele arvudele.
+- Väljal `modification` anna alati täpne, konservatiivne tänane treeningkava või
+  asendusplaan: soojendus, põhiosa, pausid, intensiivsus/tempo kui võimalik, ning lõdvestus.
 - Ära anna meditsiinilist nõu.
 - Kategooria peab olema täpselt üks neljast.
 """
@@ -92,7 +100,7 @@ def select_system_prompt(variant: str) -> str:
 
 RESPONSE_SCHEMA = {
     "type": "object",
-    "required": ["category", "rationale", "confidence"],
+    "required": ["category", "rationale", "modification", "confidence"],
     "properties": {
         "category": {
             "type": "string",
@@ -109,7 +117,11 @@ RESPONSE_SCHEMA = {
         },
         "modification": {
             "type": "string",
-            "description": "Valikuline: konkreetne asendus, kui esialgne plaan ei sobi.",
+            "description": (
+                "Kohustuslik: täpne tänane treeningkava või asendusplaan. "
+                "Sisalda soojendus, põhiosa (nt 5×1000 m ja 3×200 m), pausid, "
+                "intensiivsus/tempo kui võimalik, ning lõdvestus."
+            ),
         },
         "confidence": {
             "type": "string",
@@ -136,6 +148,11 @@ _FEW_SHOT_EXAMPLES = [
                 "kroonilisest baasist 12% üle — tervislik tõus. Eilne RPE 5 ja uni 8 h näitavad head taastumist. "
                 "Planeeritud 6×1 km tempo sobib praegusesse koormusprofiili."
             ),
+            "modification": (
+                "2 km kerget soojendust + jooksuharjutused; 6×1000 m @ 3:20–3:25/km, "
+                "2:00 sörkipaus; lõppu 3×200 m kontrollitult kiirelt, 200 m sörkipaus; "
+                "2 km lõdvestust."
+            ),
             "confidence": "kõrge",
             "acknowledges_safety_flags": [],
         },
@@ -151,7 +168,10 @@ _FEW_SHOT_EXAMPLES = [
                 "ACWR 1.62 ületab ohupiiri 1.5 ja kaks järjestikust RPE 8 päeva viitavad kogunenud väsimusele — "
                 "intervallitreening sel taustal tõstab vigastusriski. Taastumispäev on ainus vastutustundlik valik."
             ),
-            "modification": "45 min väga kerge jalutus-lodjakas-tempo või puhkepäev; pikk uni.",
+            "modification": (
+                "Põhitreening ära jätta; 30–45 min väga kerget kõndi või rattasõitu Z1, "
+                "10 min liikuvust ja kerget rullimist; ei lõike ega tempojooksu; prioriteet uni ja söök."
+            ),
             "confidence": "kõrge",
             "acknowledges_safety_flags": ["acwr_high", "rpe_consecutive_high"],
         },
@@ -287,6 +307,7 @@ def _compose_user_prompt(
     sections.append("\n# Sinu ülesanne")
     sections.append(
         "Anna täna sellele sportlasele andmepõhine soovitus JSON-is, mis vastab skeemile. "
+        "Täida `modification` alati konkreetse treeningkava või asendusplaaniga, mitte üldise soovitusega. "
         "Ära lisa midagi JSON-ist väljaspoole. Väljund peab olema parsitav json.loads()-iga."
     )
 
