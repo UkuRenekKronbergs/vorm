@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
+DATA_CONSENT_VERSION = "2026-05-19"
+
 
 @dataclass(frozen=True)
 class TrainingActivity:
@@ -104,6 +106,34 @@ class UserRole:
 
 
 @dataclass(frozen=True)
+class UserConsent:
+    """Legal-basis consent flags for processing sensitive training data.
+
+    Training history, pulse, sleep, stress, illness flags, notes and derived
+    readiness/load metrics can reveal health-related state. In Supabase mode we
+    therefore keep an explicit consent row before storing or processing that
+    data beyond a local demo session.
+    """
+
+    consent_version: str = DATA_CONSENT_VERSION
+    sensitive_data_accepted_at: datetime | None = None
+    llm_aggregate_accepted_at: datetime | None = None
+    coach_access_terms_accepted_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    @property
+    def athlete_processing_ready(self) -> bool:
+        return (
+            self.sensitive_data_accepted_at is not None
+            and self.llm_aggregate_accepted_at is not None
+        )
+
+    @property
+    def coach_terms_ready(self) -> bool:
+        return self.coach_access_terms_accepted_at is not None
+
+
+@dataclass(frozen=True)
 class CoachAthleteLink:
     """Treener ↔ sportlane seos kutsekoodi kaudu.
 
@@ -119,6 +149,12 @@ class CoachAthleteLink:
     status: str  # 'pending' | 'active' | 'revoked'
     created_at: datetime | None = None
     accepted_at: datetime | None = None
+    athlete_consent_at: datetime | None = None
+    athlete_consent_version: str | None = None
+
+    @property
+    def has_active_data_consent(self) -> bool:
+        return self.status == "active" and self.athlete_consent_at is not None
 
 
 def _distance_meters(key: str) -> int:

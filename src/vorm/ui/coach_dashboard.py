@@ -4,7 +4,7 @@ When the signed-in user's role is ``'coach'``, this UI replaces the regular
 athlete-tab layout. The coach can:
 
 1. Generate invite codes for new athletes (athlete pastes the code into
-   their own sidebar → link becomes 'active' → coach sees them in the list).
+   their own sidebar and accepts the consent form → link becomes readable).
 2. See linked athletes + their recent daily-log entries (RLS-mediated
    read of ``athlete_profiles`` + ``daily_logs``).
 3. Enter blind §4.2 päevaotsuseid for any linked athlete. The decision is
@@ -23,6 +23,7 @@ from datetime import date, timedelta
 import pandas as pd
 import streamlit as st
 
+from ..data.models import DATA_CONSENT_VERSION
 from ..data.storage import CoachDecision
 from ..data.supabase_store import SupabaseStore
 
@@ -35,6 +36,13 @@ _CATEGORY_OPTIONS = (
 
 _SELECTED_ATHLETE_KEY = "_vorm_coach_selected_athlete"
 _LAST_INVITE_KEY = "_vorm_coach_last_invite_code"
+_COACH_SHARE_CONSENT_TEXT = (
+    "Treener saab näha sinu sportlase profiili, päevalogi, soovituse ajalugu, "
+    "subjektiivseid sisendeid (RPE, uni, stress, haigusmärge, märkmed) ja neist "
+    "tuletatud koormusnäitajaid. Need võivad võimaldada tervise, taastumise, "
+    "pohmaka või menstruaaltsükli kohta järeldusi. Treener ei näe Strava tokenit, "
+    "GPS-rajapunkte ega toorpulsi ridu."
+)
 
 
 def render_coach_home(
@@ -96,7 +104,8 @@ def _render_invites_section(coach_store: SupabaseStore) -> None:
     st.markdown("### 🎟️ Kutsed")
     st.caption(
         "Iga sportlane sisestab oma sidebari osasse 'Mul on treener' alloleva "
-        "8-tähelise koodi. Pärast seda saad teda allpool sportlaste loendis vaadata."
+        "8-tähelise koodi ja kinnitab eraldi nõusoleku. Kutsekood üksi ei anna "
+        "ligipääsu tundlikele andmetele."
     )
 
     if st.button(
@@ -117,7 +126,7 @@ def _render_invites_section(coach_store: SupabaseStore) -> None:
     if last_code:
         st.success(
             f"Anna sportlasele see kood: **`{last_code}`** "
-            "(kehtib seni, kuni keegi pole seda kasutanud)"
+            "(kehtib seni, kuni sportlane selle koos nõusolekuga kasutab)"
         )
 
     try:
@@ -173,6 +182,21 @@ def _render_athletes_section(
 
 
 def _render_athlete_card(link, athlete_store: SupabaseStore) -> None:
+    if not link.has_active_data_consent:
+        col_info, col_action = st.columns([4, 1])
+        col_info.markdown("**Sportlane - nõusolek puudub**")
+        col_info.caption(
+            "Seos on olemas, kuid sportlane pole veel kinnitanud tundlike "
+            "andmete jagamise nõusolekut. Profiili ja päevalogi ei kuvata."
+        )
+        col_action.button(
+            "Ootel",
+            key=f"_coach_view_blocked_{link.id}",
+            disabled=True,
+            width="stretch",
+        )
+        return
+
     try:
         profile = athlete_store.load_profile()
     except Exception:
@@ -407,11 +431,41 @@ def render_athlete_coach_panel(athlete_store: SupabaseStore) -> None:
     if links:
         for link in links:
             coach_name = _read_coach_display_name(athlete_store, link.coach_user_id)
+            if not link.has_active_data_consent:
+                st.sidebar.warning(f"Seos ootel: **{coach_name}**")
+                st.sidebar.caption(
+                    "Treener ei näe sinu profiili ega päevalogi enne, kui annad "
+                    "selgesõnalise jagamise nõusoleku."
+                )
+                with st.sidebar.expander(f"Nõusolek: {coach_name}"):
+                    st.markdown(_COACH_SHARE_CONSENT_TEXT)
+                    renewed_ok = st.checkbox(
+                        "Annan sellele treenerile nõusoleku neid andmeid näha ja "
+                        "töödelda treeningsoovituse ning valideerimise eesmärgil.",
+                        key=f"_vorm_link_consent_{link.id}",
+                    )
+                    st.caption(f"Nõusoleku versioon: {DATA_CONSENT_VERSION}")
+                    if st.button(
+                        "Salvesta nõusolek",
+                        key=f"_vorm_link_consent_save_{link.id}",
+                        type="primary",
+                        disabled=not renewed_ok,
+                        width="stretch",
+                    ):
+                        try:
+                            athlete_store.grant_link_consent(link.id)
+                        except Exception as exc:
+                            st.error(f"Nõusoleku salvestamine ebaõnnestus: {exc}")
+                            return
+                        st.success("Nõusolek salvestatud.")
+                        st.rerun()
+                continue
+
             st.sidebar.success(f"Seotud: **{coach_name}**")
             st.sidebar.caption(
-                "Treener näeb sinu profiili, päevalogi ja saab sinule "
-                "saata otsuseid §4.2 pimemenetluses. Tema **ei** näe "
-                "sinu Strava-ühendust ega toorpulsi-andmeid."
+                "Andsid nõusoleku: treener näeb sinu profiili, päevalogi ja "
+                "saab sinule saata otsuseid §4.2 pimemenetluses. Tema **ei** "
+                "näe sinu Strava-ühendust, GPS-radu ega toorpulsiandmeid."
             )
         _render_sidebar_latest_coach_decision(athlete_store)
     else:
@@ -428,10 +482,18 @@ def render_athlete_coach_panel(athlete_store: SupabaseStore) -> None:
             max_chars=12,
             help="8-täheline kood, mille treener sulle saatis.",
         )
+        st.markdown(_COACH_SHARE_CONSENT_TEXT)
+        share_ok = st.checkbox(
+            "Annan sellele treenerile nõusoleku neid andmeid näha ja töödelda "
+            "treeningsoovituse ning valideerimise eesmärgil.",
+            key="_vorm_athlete_invite_consent",
+        )
+        st.caption(f"Nõusoleku versioon: {DATA_CONSENT_VERSION}")
         if st.button(
             "Seo treeneriga",
             key="_vorm_athlete_invite_accept",
             type="primary",
+            disabled=not share_ok,
             width="stretch",
         ):
             cleaned = (code or "").strip().upper()
@@ -439,7 +501,10 @@ def render_athlete_coach_panel(athlete_store: SupabaseStore) -> None:
                 st.error("Kutsekood on kohustuslik.")
                 return
             try:
-                athlete_store.accept_invite(cleaned)
+                athlete_store.accept_invite(
+                    cleaned,
+                    consent_to_share_sensitive_data=share_ok,
+                )
             except LookupError as exc:
                 st.error(str(exc))
                 return
@@ -503,6 +568,7 @@ def list_linked_coach_names(athlete_store: SupabaseStore) -> list[str]:
     return [
         _read_coach_display_name(athlete_store, link.coach_user_id)
         for link in links
+        if link.has_active_data_consent
     ]
 
 

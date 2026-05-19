@@ -20,10 +20,17 @@ from __future__ import annotations
 
 import secrets
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
 
-from .models import AthleteProfile, CoachAthleteLink, StravaConnection, UserRole
+from .models import (
+    DATA_CONSENT_VERSION,
+    AthleteProfile,
+    CoachAthleteLink,
+    StravaConnection,
+    UserConsent,
+    UserRole,
+)
 from .storage import CoachDecision, DailyLogEntry
 
 if TYPE_CHECKING:
@@ -269,6 +276,72 @@ class SupabaseStore:
         ).execute()
         return UserRole(role=role, display_name=display_name or "")
 
+    # --- Consent / legal basis -------------------------------------------
+
+    def load_user_consent(self) -> UserConsent | None:
+        """Fetch the signed-in user's data-processing consent row."""
+        resp = (
+            self.client.table("user_consents")
+            .select("*")
+            .eq("user_id", self.user_id)
+            .limit(1)
+            .execute()
+        )
+        rows = resp.data or []
+        return _row_to_user_consent(rows[0]) if rows else None
+
+    def save_user_consent(
+        self,
+        *,
+        accept_sensitive_data: bool = False,
+        accept_llm_aggregate: bool = False,
+        accept_coach_terms: bool = False,
+        consent_version: str = DATA_CONSENT_VERSION,
+    ) -> UserConsent:
+        """Persist explicit consent/attestation for sensitive data use.
+
+        Existing acceptance timestamps are preserved; a checked box records the
+        current time. This makes the row idempotent across reruns and lets a
+        coach accept only coach-handling terms while an athlete accepts only
+        athlete data processing.
+        """
+        existing = self.load_user_consent()
+        now = datetime.now(UTC)
+
+        sensitive_at = (
+            now if accept_sensitive_data else (
+                existing.sensitive_data_accepted_at if existing else None
+            )
+        )
+        llm_at = (
+            now if accept_llm_aggregate else (
+                existing.llm_aggregate_accepted_at if existing else None
+            )
+        )
+        coach_terms_at = (
+            now if accept_coach_terms else (
+                existing.coach_access_terms_accepted_at if existing else None
+            )
+        )
+
+        payload: dict[str, Any] = {
+            "user_id": self.user_id,
+            "consent_version": consent_version,
+            "sensitive_data_accepted_at": _datetime_to_iso(sensitive_at),
+            "llm_aggregate_accepted_at": _datetime_to_iso(llm_at),
+            "coach_access_terms_accepted_at": _datetime_to_iso(coach_terms_at),
+        }
+        self.client.table("user_consents").upsert(
+            payload, on_conflict="user_id"
+        ).execute()
+        return UserConsent(
+            consent_version=consent_version,
+            sensitive_data_accepted_at=sensitive_at,
+            llm_aggregate_accepted_at=llm_at,
+            coach_access_terms_accepted_at=coach_terms_at,
+            updated_at=now,
+        )
+
     # --- Coach ↔ athlete links --------------------------------------------
 
     def create_invite(self) -> CoachAthleteLink:
@@ -322,23 +395,36 @@ class SupabaseStore:
         resp = q.order("accepted_at", desc=False).execute()
         return [_row_to_link(r) for r in (resp.data or [])]
 
-    def accept_invite(self, code: str) -> CoachAthleteLink:
+    def accept_invite(
+        self,
+        code: str,
+        *,
+        consent_to_share_sensitive_data: bool = False,
+        consent_version: str = DATA_CONSENT_VERSION,
+    ) -> CoachAthleteLink:
         """Athlete claims a coach's pending invite code.
 
         This goes through a small Supabase RPC instead of a direct table
         UPDATE. Postgres RLS requires an UPDATE target row to also be visible
         through a SELECT policy; making all pending invite rows SELECT-able
-        would leak unused invite codes. The RPC validates the code server-side
-        and returns only the claimed row.
+        would leak unused invite codes. The RPC validates the code server-side,
+        requires the athlete's explicit data-sharing consent, and returns only
+        the claimed row.
         """
         cleaned = (code or "").strip().upper()
         if not cleaned:
             raise ValueError("Kutsekood on kohustuslik.")
+        if not consent_to_share_sensitive_data:
+            raise ValueError("Treeneriga jagamiseks on vaja selget nõusolekut.")
         try:
             resp = (
                 self.client.rpc(
                     "accept_coach_invite",
-                    {"p_invite_code": cleaned},
+                    {
+                        "p_invite_code": cleaned,
+                        "p_athlete_consent": True,
+                        "p_consent_version": consent_version,
+                    },
                 )
                 .execute()
             )
@@ -355,6 +441,40 @@ class SupabaseStore:
             raise LookupError(
                 "Kutsekood ei kehti või on juba kasutatud. Küsi treenerilt uut koodi."
             )
+        return _row_to_link(rows[0])
+
+    def grant_link_consent(
+        self,
+        link_id: str,
+        *,
+        consent_version: str = DATA_CONSENT_VERSION,
+    ) -> CoachAthleteLink:
+        """Athlete grants renewed consent for an existing active coach link."""
+        if not link_id:
+            raise ValueError("Seose ID on kohustuslik.")
+        try:
+            resp = (
+                self.client.rpc(
+                    "grant_coach_link_consent",
+                    {
+                        "p_link_id": link_id,
+                        "p_athlete_consent": True,
+                        "p_consent_version": consent_version,
+                    },
+                )
+                .execute()
+            )
+        except Exception as exc:
+            message = str(exc)
+            if "grant_coach_link_consent" in message or "function" in message.lower():
+                raise RuntimeError(
+                    "Supabase skeem vajab uuendamist: käivita "
+                    "docs/supabase_schema.sql SQL Editoris uuesti."
+                ) from exc
+            raise
+        rows = resp.data or []
+        if not rows:
+            raise LookupError("Aktiivset treeneriseost ei leitud.")
         return _row_to_link(rows[0])
 
     def revoke_link(self, link_id: str) -> None:
@@ -403,6 +523,22 @@ def _row_to_strava_connection(row: dict[str, Any]) -> StravaConnection:
     )
 
 
+def _row_to_user_consent(row: dict[str, Any]) -> UserConsent:
+    return UserConsent(
+        consent_version=row.get("consent_version") or DATA_CONSENT_VERSION,
+        sensitive_data_accepted_at=_parse_optional_iso_datetime(
+            row.get("sensitive_data_accepted_at")
+        ),
+        llm_aggregate_accepted_at=_parse_optional_iso_datetime(
+            row.get("llm_aggregate_accepted_at")
+        ),
+        coach_access_terms_accepted_at=_parse_optional_iso_datetime(
+            row.get("coach_access_terms_accepted_at")
+        ),
+        updated_at=_parse_optional_iso_datetime(row.get("updated_at")),
+    )
+
+
 def _row_to_daily_log(row: dict[str, Any]) -> DailyLogEntry:
     # Postgres returns timestamptz as ISO-8601 with `+00:00`; the older `Z`
     # suffix variant shows up if the JSON serializer trims it. Handle both.
@@ -435,6 +571,10 @@ def _parse_optional_iso_datetime(raw: Any) -> datetime | None:
         return None
 
 
+def _datetime_to_iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
 def _row_to_link(row: dict[str, Any]) -> CoachAthleteLink:
     return CoachAthleteLink(
         id=row["id"],
@@ -444,6 +584,8 @@ def _row_to_link(row: dict[str, Any]) -> CoachAthleteLink:
         status=row["status"],
         created_at=_parse_optional_iso_datetime(row.get("created_at")),
         accepted_at=_parse_optional_iso_datetime(row.get("accepted_at")),
+        athlete_consent_at=_parse_optional_iso_datetime(row.get("athlete_consent_at")),
+        athlete_consent_version=row.get("athlete_consent_version"),
     )
 
 

@@ -33,7 +33,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import streamlit as st
 
 from .config import load_config
-from .data.models import UserRole
+from .data.models import DATA_CONSENT_VERSION, UserConsent, UserRole
 from .data.supabase_store import SupabaseNotConfigured, SupabaseStore
 
 if TYPE_CHECKING:
@@ -51,6 +51,7 @@ class AuthUser:
 _CLIENT_KEY = "_vorm_supabase_client"
 _USER_KEY = "_vorm_auth_user"
 _ROLE_CACHE_KEY = "_vorm_auth_user_role"
+_CONSENT_CACHE_KEY = "_vorm_auth_user_consent"
 _PENDING_CONFIRM_KEY = "_vorm_auth_pending_confirm_email"
 _PASSWORD_RECOVERY_KEY = "_vorm_password_recovery_active"
 _PASSWORD_RESET_DONE_KEY = "_vorm_password_reset_done"
@@ -559,6 +560,7 @@ def sign_out() -> None:
     for key in (
         _USER_KEY,
         _ROLE_CACHE_KEY,
+        _CONSENT_CACHE_KEY,
         _PENDING_CONFIRM_KEY,
         _PASSWORD_RECOVERY_KEY,
         _PASSWORD_RESET_DONE_KEY,
@@ -655,6 +657,152 @@ def invalidate_role_cache() -> None:
     value is visible in the same session.
     """
     st.session_state.pop(_ROLE_CACHE_KEY, None)
+
+
+def invalidate_consent_cache() -> None:
+    """Drop cached consent state after the user accepts a consent form."""
+    st.session_state.pop(_CONSENT_CACHE_KEY, None)
+
+
+def current_user_consent(store: SupabaseStore) -> UserConsent | None:
+    """Resolve and cache the current user's consent row."""
+    cached = st.session_state.get(_CONSENT_CACHE_KEY)
+    if isinstance(cached, UserConsent):
+        return cached
+    consent = store.load_user_consent()
+    if consent is not None:
+        st.session_state[_CONSENT_CACHE_KEY] = consent
+    return consent
+
+
+def has_required_data_consent(
+    role: UserRole | None,
+    consent: UserConsent | None,
+) -> bool:
+    """True when the signed-in user has the legal-basis gate completed."""
+    if consent is None or consent.consent_version != DATA_CONSENT_VERSION:
+        return False
+    if role and role.role == "coach":
+        return consent.coach_terms_ready
+    return consent.athlete_processing_ready
+
+
+def render_data_consent_gate(
+    *,
+    role: UserRole | None,
+    store: SupabaseStore,
+) -> bool:
+    """Render a blocking consent/attestation form when Supabase mode needs it.
+
+    Returns True when the user may continue into the app. Athlete consent is
+    about processing their own sensitive training data. Coach consent is an
+    attestation that they will only access athlete data after the athlete's
+    explicit sharing consent exists.
+    """
+    try:
+        consent = current_user_consent(store)
+    except Exception as exc:
+        st.title("🏃 Vorm.ai")
+        st.error(
+            "Andmete töötlemise nõusoleku tabel puudub või pole ligipääsetav. "
+            "Käivita Supabase SQL Editoris uuesti `docs/supabase_schema.sql`."
+        )
+        st.caption(f"Tehniline põhjus: {exc}")
+        return False
+
+    if has_required_data_consent(role, consent):
+        return True
+
+    st.title("🏃 Vorm.ai")
+    st.markdown("### Andmete töötlemise nõusolek")
+    st.warning(
+        "Treeningandmed, pulss, uni, stress, haigusmärge ja vabateksti märkmed "
+        "võivad võimaldada järeldusi tervise, taastumise, pohmaka või "
+        "menstruaaltsükli kohta. Neid ei tohi töödelda ega teisele inimesele "
+        "näidata ilma selge õigusliku aluseta."
+    )
+
+    if role and role.role == "coach":
+        return _render_coach_consent_form(store)
+    return _render_athlete_consent_form(store)
+
+
+def _render_athlete_consent_form(store: SupabaseStore) -> bool:
+    st.markdown(
+        "Vorm.ai saab pilverežiimis sinu profiili, päevalogi, Strava ühenduse "
+        "metaandmeid ja treeningu koondnäitajaid salvestada ainult sinu "
+        "selgesõnalise nõusoleku alusel. Treenerile jagamine on eraldi samm "
+        "kutsekoodi juures."
+    )
+    with st.form("vorm_data_consent_form"):
+        sensitive_ok = st.checkbox(
+            "Annan nõusoleku, et Vorm.ai töötleb minu treeningu-, pulsi-, "
+            "une-, stressi-, haigus- ja märkmete andmeid treeningsoovituse, "
+            "koormusanalüüsi ja õppeprojekti valideerimise eesmärgil.",
+            key="_vorm_consent_sensitive",
+        )
+        llm_ok = st.checkbox(
+            "Annan nõusoleku, et LLM-pakkujale saadetakse ainult agregeeritud "
+            "näitajad ja metaandmed (nt ACWR, TRIMP, RPE, uni); GPS-punkte, "
+            "toorpulsi ridu ega Strava tokenit ei saadeta.",
+            key="_vorm_consent_llm",
+        )
+        st.caption(f"Nõusoleku versioon: {DATA_CONSENT_VERSION}")
+        submitted = st.form_submit_button(
+            "Nõustun ja jätkan", type="primary", width="stretch"
+        )
+        if submitted:
+            if not (sensitive_ok and llm_ok):
+                st.error("Jätkamiseks on vaja mõlemat nõusolekut.")
+                return False
+            try:
+                consent = store.save_user_consent(
+                    accept_sensitive_data=True,
+                    accept_llm_aggregate=True,
+                )
+            except Exception as exc:
+                st.error(f"Nõusoleku salvestamine ebaõnnestus: {exc}")
+                return False
+            st.session_state[_CONSENT_CACHE_KEY] = consent
+            st.success("Nõusolek salvestatud.")
+            st.rerun()
+    st.caption(
+        "Kui sa ei soovi isikuandmeid töödelda, kasuta külalisena ainult demoandmeid "
+        "või katkesta."
+    )
+    return False
+
+
+def _render_coach_consent_form(store: SupabaseStore) -> bool:
+    st.markdown(
+        "Treenerina näed sportlase profiili, päevalogi ja otsuste konteksti "
+        "ainult siis, kui sportlane on kutsekoodi juures andnud eraldi "
+        "nõusoleku. Kutsekood üksi ei ole nõusolek tundlike andmete töötlemiseks."
+    )
+    with st.form("vorm_coach_terms_form"):
+        coach_ok = st.checkbox(
+            "Kinnitan, et kasutan sportlase andmeid ainult treeningsoovituse "
+            "ja õppeprojekti valideerimise eesmärgil, ei jaga neid edasi ning "
+            "ei tee ega kasuta kõrvalisi tervise-, pohmaka- või tsüklijäreldusi.",
+            key="_vorm_consent_coach_terms",
+        )
+        st.caption(f"Nõusoleku/tingimuste versioon: {DATA_CONSENT_VERSION}")
+        submitted = st.form_submit_button(
+            "Kinnitan ja jätkan", type="primary", width="stretch"
+        )
+        if submitted:
+            if not coach_ok:
+                st.error("Jätkamiseks on vaja treeneri kinnitust.")
+                return False
+            try:
+                consent = store.save_user_consent(accept_coach_terms=True)
+            except Exception as exc:
+                st.error(f"Kinnituse salvestamine ebaõnnestus: {exc}")
+                return False
+            st.session_state[_CONSENT_CACHE_KEY] = consent
+            st.success("Kinnitus salvestatud.")
+            st.rerun()
+    return False
 
 
 def _humanize_auth_error(exc: Exception) -> str:
@@ -912,8 +1060,8 @@ def render_login_gate() -> AuthUser | None:
     st.divider()
     st.caption(
         "Soovid lihtsalt rakendust katsetada ilma kontot loomata? "
-        "Külalisrežiimis sinu andmed **ei salvestu pilve** — kõik on "
-        "ainult selle brauserisessiooni jaoks."
+        "Külalisrežiim on mõeldud demoandmetele; ära lae ega sisesta sinna "
+        "enda või kellegi teise tundlikke treeningu-/terviseandmeid."
     )
     if st.button(
         "👤 Jätka külalisena",
@@ -939,7 +1087,7 @@ def render_sidebar_user_panel() -> None:
     if is_guest():
         with st.sidebar:
             st.markdown("👤 **Külaline**")
-            st.caption("Andmed ei salvestu pilve.")
+            st.caption("Ainult demoandmetele; ära sisesta isikuandmeid.")
             if st.button(
                 "Logi sisse / loo konto",
                 key="_vorm_exit_guest",

@@ -64,9 +64,11 @@ def _render_welcome(user_email: str) -> None:
 
         ### Privaatsus
 
-        Sinu andmed salvestuvad sinu **enda Supabase-kontosse**. LLM näeb ainult
-        **agregeeritud näitajaid** (ACWR, RPE, TRIMP) — GPS-rajad ja toorpulsi-
-        read jäävad lokaalseks.
+        Sinu andmed salvestuvad sinu **enda Supabase-kontosse** pärast
+        andmetöötluse nõusolekut. LLM näeb ainult **agregeeritud näitajaid**
+        (ACWR, RPE, TRIMP) — GPS-rajad, toorpulsiread ja tokenid jäävad LLM-ist
+        välja. Treener näeb andmeid ainult siis, kui annad kutsekoodi juures
+        eraldi jagamisnõusoleku.
 
         ### Vastutuspiir
 

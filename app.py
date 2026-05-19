@@ -703,6 +703,9 @@ def _autosave_profile(profile: AthleteProfile) -> None:
     way. Failures surface as a quiet sidebar warning so a transient network
     blip doesn't crash the page.
     """
+    if auth.is_guest():
+        st.session_state[_PROFILE_CACHE_KEY] = profile
+        return
     cached = st.session_state.get(_PROFILE_CACHE_KEY)
     if isinstance(cached, AthleteProfile) and cached == profile:
         return
@@ -812,6 +815,12 @@ def _render_daily_log_form(
     rationale: str | None,
 ) -> None:
     """Project Plan §4.3 — collect the athlete's reaction to the recommendation."""
+    if auth.is_guest():
+        st.info(
+            "Külalisrežiimis päevalogi ei salvestata. Logimiseks loo konto ja "
+            "kinnita andmetöötluse nõusolek."
+        )
+        return
     store = _get_user_store()
     existing = store.get_daily_log(log_day)
     with st.form(f"daily_log_{log_day.isoformat()}", clear_on_submit=False):
@@ -958,26 +967,34 @@ if cfg.has_supabase:
     if auth_user is None and not auth.is_guest():
         st.stop()
 
+signed_in_store = None
+signed_in_role = None
+if auth_user and not auth.is_guest():
+    signed_in_store = auth.get_store()
+    if signed_in_store is None:
+        st.error("Sisselogimine on katki. Logi sisse uuesti.")
+        st.stop()
+    signed_in_role = auth.current_user_role()
+    if not auth.render_data_consent_gate(
+        role=signed_in_role,
+        store=signed_in_store,
+    ):
+        st.stop()
+
 # Coach-mode short-circuit: when the signed-in user's role is 'coach',
 # replace the standard athlete-tab UI with the coach dashboard. Coaches
 # don't have their own activity/profile data — they read linked athletes'
 # rows through Row-Level Security policies in Supabase.
 if auth_user and not auth.is_guest():
-    user_role = auth.current_user_role()
-    if user_role and user_role.role == "coach":
+    if signed_in_role and signed_in_role.role == "coach":
         st.sidebar.title("🏃 Vorm.ai")
         st.sidebar.caption("AI-põhine treeningkoormuse analüüsija")
         auth.render_sidebar_user_panel()
         st.sidebar.divider()
         render_theme_selector(container=st.sidebar)
 
-        coach_store = auth.get_store()
-        if coach_store is None:
-            st.error("Sisselogimine on katki. Logi sisse uuesti.")
-            st.stop()
-
         render_coach_home(
-            coach_store,
+            signed_in_store,
             build_athlete_store=auth.get_store_for,
         )
         st.stop()
@@ -1022,7 +1039,15 @@ if auth_user and not auth.is_guest():
 _consume_strava_oauth_callback()
 strava_connection = _load_saved_strava_connection(cfg)
 
-data_source_options = [_SOURCE_MANUAL, _SOURCE_CSV, _SOURCE_STRAVA, _SOURCE_GARMIN]
+if auth.is_guest():
+    st.session_state[_DATA_SOURCE_KEY] = _SOURCE_MANUAL
+    data_source_options = [_SOURCE_MANUAL]
+    st.sidebar.info(
+        "Külalisrežiim on ainult demoandmete jaoks. Isiklike treeningandmete "
+        "jaoks loo konto ning kinnita andmetöötluse nõusolek."
+    )
+else:
+    data_source_options = [_SOURCE_MANUAL, _SOURCE_CSV, _SOURCE_STRAVA, _SOURCE_GARMIN]
 
 source = st.sidebar.radio(
     "Andmeallikas",
@@ -1117,7 +1142,11 @@ analysis_date: date = st.sidebar.date_input(
 )
 
 st.sidebar.divider()
-if cfg.has_llm:
+if auth.is_guest():
+    st.sidebar.info(
+        "LLM on külalisrežiimis välja lülitatud — kasuta ainult demoandmeid."
+    )
+elif cfg.has_llm:
     st.sidebar.success(f"LLM aktiivne: {cfg.llm_provider} / {cfg.llm_model}")
 else:
     st.sidebar.info("LLM pole seadistatud — reeglivastus kuvatakse. Lisa ANTHROPIC_API_KEY .env-i täieliku analüüsi jaoks.")
@@ -1150,11 +1179,18 @@ with st.container(border=True):
 
 if not has_activities:
     if manual_without_history:
-        st.info(
-            "Käsitsi lisamine alustab tühjalt. Lae vasakult CSV, ühenda andmeallikas "
-            "või vajuta **Täida demoandmetega**, et näidist kohe proovida. "
-            "Tänase plaani ja treeningkava kohta saad LLM-ilt küsida ka ilma ajaloofailita."
-        )
+        if auth.is_guest():
+            st.info(
+                "Külalisrežiim alustab tühjalt ja on mõeldud ainult demoandmetele. "
+                "Vajuta vasakul **Täida demoandmetega**, et rakendust ilma "
+                "isikuandmeteta proovida."
+            )
+        else:
+            st.info(
+                "Käsitsi lisamine alustab tühjalt. Lae vasakult CSV, ühenda andmeallikas "
+                "või vajuta **Täida demoandmetega**, et näidist kohe proovida. "
+                "Tänase plaani ja treeningkava kohta saad LLM-ilt küsida ka ilma ajaloofailita."
+            )
     else:
         st.info("Andmed pole veel laaditud. Kontrolli vasakul valitud andmeallikat või lae CSV.")
         st.stop()
@@ -1184,10 +1220,16 @@ with tab1:
     summary = current_summary
 
     if not has_activities:
-        st.info(
-            "Treeningajalugu puudub, seega ACWR/TRIMP numbrid on tühjad. "
-            "LLM kasutab sinu profiili, tänast plaani ja subjektiivseid sisendeid."
-        )
+        if auth.is_guest():
+            st.info(
+                "Treeningajalugu puudub, seega ACWR/TRIMP numbrid on tühjad. "
+                "Külalisrežiimis LLM-i ei kasutata; demo jaoks täida vasakult näidisandmed."
+            )
+        else:
+            st.info(
+                "Treeningajalugu puudub, seega ACWR/TRIMP numbrid on tühjad. "
+                "LLM kasutab sinu profiili, tänast plaani ja subjektiivseid sisendeid."
+            )
 
     col_metrics = st.columns(4)
     col_metrics[0].metric(
@@ -1287,7 +1329,12 @@ with tab1:
         )
 
         llm_result = None
-        if cfg.has_llm and today_plan.strip():
+        if auth.is_guest() and today_plan.strip():
+            st.info(
+                "Külalisrežiimis LLM-i ei kasutata, et isikuandmeid ilma "
+                "nõusolekuta välisele teenusele mitte saata."
+            )
+        elif cfg.has_llm and today_plan.strip():
             with st.spinner("Küsin LLM-lt soovitust..."):
                 try:
                     llm_result = generate_recommendation(prompt_bundle, cfg)
@@ -1675,9 +1722,18 @@ with tab6:
         "soovitust tundus. Need andmed lähevad valideerimise §4.3 analüüsi."
     )
 
-    log_store = _get_user_store()
-    logs = log_store.list_daily_logs()
-    if not logs:
+    if auth.is_guest():
+        st.info(
+            "Külalisrežiimis päevalogi ajalugu ei kuvata ega salvestata. "
+            "See vaade on mõeldud nõusolekuga kontoga kasutamiseks."
+        )
+        logs = []
+    else:
+        log_store = _get_user_store()
+        logs = log_store.list_daily_logs()
+    if auth.is_guest():
+        pass
+    elif not logs:
         st.info(
             "Päevalogisid pole veel. Mine **Tänane soovitus**-tabi, vajuta "
             "_Hinda koormust_ ja täida päevalogi vorm."
@@ -1814,6 +1870,12 @@ with tab7:
         "kategooria), **close** (mõlemad ettevaatlikud, aga erinev tüüp), "
         "**wrong** (üks ütleb 'jätka', teine 'olge ettevaatlikud')."
     )
+    if auth.is_guest():
+        st.info(
+            "Külalisrežiimis treeneri võrdlust ei salvestata, sest see looks "
+            "tundliku valideerimisandmestiku ilma konto ja nõusolekuta."
+        )
+        st.stop()
 
     coach_store = _get_user_store()
 

@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from vorm import auth
-from vorm.data.models import UserRole
+from vorm.data.models import DATA_CONSENT_VERSION, UserConsent, UserRole
 
 # --- current_user_role caching ----------------------------------------------
 
@@ -59,6 +59,34 @@ def test_invalidate_role_cache_is_noop_when_absent(monkeypatch):
     state: dict = {}
     monkeypatch.setattr(auth.st, "session_state", state)
     auth.invalidate_role_cache()  # should not raise
+
+
+# --- consent gates -----------------------------------------------------------
+
+def test_has_required_data_consent_for_athlete_requires_sensitive_and_llm():
+    consent = UserConsent(
+        consent_version=DATA_CONSENT_VERSION,
+        sensitive_data_accepted_at=object(),
+        llm_aggregate_accepted_at=object(),
+    )
+    assert auth.has_required_data_consent(UserRole(role="athlete"), consent)
+
+
+def test_has_required_data_consent_rejects_old_version():
+    consent = UserConsent(
+        consent_version="old",
+        sensitive_data_accepted_at=object(),
+        llm_aggregate_accepted_at=object(),
+    )
+    assert not auth.has_required_data_consent(UserRole(role="athlete"), consent)
+
+
+def test_has_required_data_consent_for_coach_requires_terms():
+    consent = UserConsent(
+        consent_version=DATA_CONSENT_VERSION,
+        coach_access_terms_accepted_at=object(),
+    )
+    assert auth.has_required_data_consent(UserRole(role="coach"), consent)
 
 
 # --- read requested_role from metadata --------------------------------------

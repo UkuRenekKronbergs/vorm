@@ -3,8 +3,9 @@
 -- Käivita see üks kord:
 --   Supabase Dashboard → SQL Editor → New query → kleebi sisu → Run.
 --
--- Loob kuus kasutaja-skoobiga tabelit ja kutsekoodi aktsepteerimise RPC:
+-- Loob seitse kasutaja-skoobiga tabelit ja kutsekoodi aktsepteerimise RPC:
 --   - user_roles          — sportlane vs treener (üks rida per kasutaja)
+--   - user_consents       — selge õiguslik alus tundlike andmete töötlemiseks
 --   - coach_athlete_links — treener ↔ sportlane seos (kutsekoodiga)
 --   - athlete_profiles    — sportlase profiil (üks rida per sportlane)
 --   - daily_logs          — päeva-logi (Project Plan §4.3, üks rida per kasutaja+kuupäev)
@@ -13,7 +14,8 @@
 --
 -- Row-Level Security on igal tabelil sees: iga kasutaja näeb/muudab AINULT
 -- enda ridu. Treener näeb LISAKS oma seotud sportlaste profiili, päevalogi
--- ja coach_decisions ridu (read + kirjuta coach_decisions-i jaoks).
+-- ja coach_decisions ridu ainult siis, kui sportlane on selleks andnud
+-- selgesõnalise jagamise nõusoleku.
 --
 -- Skript on idempotentne — võid uuesti käivitada, ilma andmeid kaotamata.
 
@@ -64,11 +66,47 @@ SELECT id, 'athlete' FROM auth.users
 ON CONFLICT (user_id) DO NOTHING;
 
 
+-- ===== user_consents =================================================
+-- Treeningandmed (pulss, uni, stress, haigusmärge, vabatekst, koormus-
+-- näitajad) võivad võimaldada tervise kohta järeldusi. Seetõttu peab
+-- pilverežiimis enne andmete töötlemist olema selge nõusolek / õiguslik alus.
+CREATE TABLE IF NOT EXISTS public.user_consents (
+    user_id                         UUID        PRIMARY KEY
+                                                REFERENCES auth.users(id)
+                                                ON DELETE CASCADE,
+    consent_version                 TEXT        NOT NULL DEFAULT '2026-05-19',
+    sensitive_data_accepted_at      TIMESTAMPTZ,
+    llm_aggregate_accepted_at       TIMESTAMPTZ,
+    coach_access_terms_accepted_at  TIMESTAMPTZ,
+    created_at                      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at                      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE public.user_consents ENABLE ROW LEVEL SECURITY;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.user_consents TO authenticated;
+
+DROP POLICY IF EXISTS "Users select own consent" ON public.user_consents;
+DROP POLICY IF EXISTS "Users insert own consent" ON public.user_consents;
+DROP POLICY IF EXISTS "Users update own consent" ON public.user_consents;
+DROP POLICY IF EXISTS "Users delete own consent" ON public.user_consents;
+
+CREATE POLICY "Users select own consent" ON public.user_consents
+    FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY "Users insert own consent" ON public.user_consents
+    FOR INSERT WITH CHECK (auth.uid() = user_id);
+CREATE POLICY "Users update own consent" ON public.user_consents
+    FOR UPDATE USING (auth.uid() = user_id)
+                WITH CHECK (auth.uid() = user_id);
+CREATE POLICY "Users delete own consent" ON public.user_consents
+    FOR DELETE USING (auth.uid() = user_id);
+
+
 -- ===== coach_athlete_links ============================================
 -- Treener loob kutsekoodi (athlete_user_id = NULL, status = 'pending').
 -- Sportlane sisestab koodi → public.accept_coach_invite(...) uuendab rea:
--- athlete_user_id = tema id, status = 'active'. Üks (treener, sportlane) paar on unikaalne, aga
--- sportlasel võib olla mitu treenerit ja vastupidi.
+-- athlete_user_id = tema id, status = 'active' ja nõusoleku ajatempel. Üks
+-- (treener, sportlane) paar on unikaalne, aga sportlasel võib olla mitu
+-- treenerit ja vastupidi.
 CREATE TABLE IF NOT EXISTS public.coach_athlete_links (
     id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     coach_user_id    UUID        NOT NULL
@@ -81,6 +119,11 @@ CREATE TABLE IF NOT EXISTS public.coach_athlete_links (
     accepted_at      TIMESTAMPTZ,
     UNIQUE (coach_user_id, athlete_user_id)
 );
+
+ALTER TABLE public.coach_athlete_links
+    ADD COLUMN IF NOT EXISTS athlete_consent_at TIMESTAMPTZ;
+ALTER TABLE public.coach_athlete_links
+    ADD COLUMN IF NOT EXISTS athlete_consent_version TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_links_coach ON public.coach_athlete_links (coach_user_id);
 CREATE INDEX IF NOT EXISTS idx_links_athlete ON public.coach_athlete_links (athlete_user_id);
@@ -126,8 +169,9 @@ REVOKE ALL ON SCHEMA private FROM PUBLIC;
 GRANT USAGE ON SCHEMA private TO authenticated;
 
 -- Helper: tagastab TRUE, kui auth.uid() on aktiivne treener antud
--- sportlasele. Kasutame seda teiste tabelite RLS-poliisides, et treener
--- näeks ainult seotud sportlaste andmeid. SECURITY DEFINER on vajalik,
+-- sportlasele JA sportlane on andnud jagamise nõusoleku. Kasutame seda
+-- teiste tabelite RLS-poliisides, et treener näeks ainult seotud sportlaste
+-- andmeid. SECURITY DEFINER on vajalik,
 -- sest muidu coach_athlete_links-i enda RLS blokeeriks lookup'i, kui
 -- seda kasutatakse teise tabeli policy-kontekstis.
 CREATE OR REPLACE FUNCTION private.is_active_coach_of(p_athlete_user_id UUID)
@@ -141,6 +185,7 @@ AS $$
         WHERE coach_user_id = auth.uid()
           AND athlete_user_id = p_athlete_user_id
           AND status = 'active'
+          AND athlete_consent_at IS NOT NULL
     );
 $$;
 
@@ -149,7 +194,18 @@ GRANT EXECUTE ON FUNCTION private.is_active_coach_of(UUID) TO authenticated;
 
 -- Sportlane aktsepteerib kutsekoodi. See on RPC, mitte tabeli otse-UPDATE,
 -- sest pending invite'i SELECT-poliitika lekiks kõik kasutamata koodid.
-CREATE OR REPLACE FUNCTION private.accept_coach_invite(p_invite_code TEXT)
+-- p_athlete_consent peab olema TRUE; kutsekood ilma selleta ei anna
+-- õiguslikku alust tundlike andmete jagamiseks.
+DROP FUNCTION IF EXISTS public.accept_coach_invite(TEXT);
+DROP FUNCTION IF EXISTS private.accept_coach_invite(TEXT);
+DROP FUNCTION IF EXISTS public.accept_coach_invite(TEXT, BOOLEAN, TEXT);
+DROP FUNCTION IF EXISTS private.accept_coach_invite(TEXT, BOOLEAN, TEXT);
+
+CREATE OR REPLACE FUNCTION private.accept_coach_invite(
+    p_invite_code TEXT,
+    p_athlete_consent BOOLEAN DEFAULT false,
+    p_consent_version TEXT DEFAULT '2026-05-19'
+)
 RETURNS SETOF public.coach_athlete_links
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -159,7 +215,9 @@ DECLARE
     v_actor UUID := auth.uid();
     v_cleaned TEXT := upper(btrim(coalesce(p_invite_code, '')));
 BEGIN
-    IF v_actor IS NULL OR v_cleaned = '' THEN
+    IF v_actor IS NULL
+       OR v_cleaned = ''
+       OR p_athlete_consent IS DISTINCT FROM TRUE THEN
         RETURN;
     END IF;
 
@@ -167,7 +225,9 @@ BEGIN
     UPDATE public.coach_athlete_links AS link
        SET athlete_user_id = v_actor,
            status = 'active',
-           accepted_at = now()
+           accepted_at = now(),
+           athlete_consent_at = now(),
+           athlete_consent_version = coalesce(nullif(p_consent_version, ''), '2026-05-19')
      WHERE link.invite_code = v_cleaned
        AND link.status = 'pending'
        AND link.athlete_user_id IS NULL
@@ -183,20 +243,85 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION private.accept_coach_invite(TEXT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION private.accept_coach_invite(TEXT) TO authenticated;
+REVOKE ALL ON FUNCTION private.accept_coach_invite(TEXT, BOOLEAN, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION private.accept_coach_invite(TEXT, BOOLEAN, TEXT) TO authenticated;
 
-CREATE OR REPLACE FUNCTION public.accept_coach_invite(p_invite_code TEXT)
+CREATE OR REPLACE FUNCTION public.accept_coach_invite(
+    p_invite_code TEXT,
+    p_athlete_consent BOOLEAN DEFAULT false,
+    p_consent_version TEXT DEFAULT '2026-05-19'
+)
 RETURNS SETOF public.coach_athlete_links
 LANGUAGE SQL
 SECURITY INVOKER
 SET search_path = public, pg_temp
 AS $$
-    SELECT * FROM private.accept_coach_invite(p_invite_code);
+    SELECT * FROM private.accept_coach_invite(
+        p_invite_code,
+        p_athlete_consent,
+        p_consent_version
+    );
 $$;
 
-REVOKE ALL ON FUNCTION public.accept_coach_invite(TEXT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.accept_coach_invite(TEXT) TO authenticated;
+REVOKE ALL ON FUNCTION public.accept_coach_invite(TEXT, BOOLEAN, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.accept_coach_invite(TEXT, BOOLEAN, TEXT) TO authenticated;
+
+-- Olemasoleva aktiivse seose puhul saab sportlane hiljem nõusoleku uuendada,
+-- ilma et treener peaks looma uue kutsekoodi. Ilma selle ajatemplita ei anna
+-- private.is_active_coach_of(...) treenerile profiili/päevalogi ligipääsu.
+DROP FUNCTION IF EXISTS public.grant_coach_link_consent(UUID, BOOLEAN, TEXT);
+DROP FUNCTION IF EXISTS private.grant_coach_link_consent(UUID, BOOLEAN, TEXT);
+
+CREATE OR REPLACE FUNCTION private.grant_coach_link_consent(
+    p_link_id UUID,
+    p_athlete_consent BOOLEAN DEFAULT false,
+    p_consent_version TEXT DEFAULT '2026-05-19'
+)
+RETURNS SETOF public.coach_athlete_links
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    v_actor UUID := auth.uid();
+BEGIN
+    IF v_actor IS NULL OR p_athlete_consent IS DISTINCT FROM TRUE THEN
+        RETURN;
+    END IF;
+
+    RETURN QUERY
+    UPDATE public.coach_athlete_links AS link
+       SET athlete_consent_at = now(),
+           athlete_consent_version = coalesce(nullif(p_consent_version, ''), '2026-05-19')
+     WHERE link.id = p_link_id
+       AND link.athlete_user_id = v_actor
+       AND link.status = 'active'
+     RETURNING link.*;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION private.grant_coach_link_consent(UUID, BOOLEAN, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION private.grant_coach_link_consent(UUID, BOOLEAN, TEXT) TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.grant_coach_link_consent(
+    p_link_id UUID,
+    p_athlete_consent BOOLEAN DEFAULT false,
+    p_consent_version TEXT DEFAULT '2026-05-19'
+)
+RETURNS SETOF public.coach_athlete_links
+LANGUAGE SQL
+SECURITY INVOKER
+SET search_path = public, pg_temp
+AS $$
+    SELECT * FROM private.grant_coach_link_consent(
+        p_link_id,
+        p_athlete_consent,
+        p_consent_version
+    );
+$$;
+
+REVOKE ALL ON FUNCTION public.grant_coach_link_consent(UUID, BOOLEAN, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.grant_coach_link_consent(UUID, BOOLEAN, TEXT) TO authenticated;
 
 
 -- ===== user_roles ristkooslased poliisid =============================
@@ -282,6 +407,11 @@ CREATE TRIGGER trg_profiles_updated_at
 DROP TRIGGER IF EXISTS trg_user_roles_updated_at ON public.user_roles;
 CREATE TRIGGER trg_user_roles_updated_at
     BEFORE UPDATE ON public.user_roles
+    FOR EACH ROW EXECUTE FUNCTION public.tg_set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_user_consents_updated_at ON public.user_consents;
+CREATE TRIGGER trg_user_consents_updated_at
+    BEFORE UPDATE ON public.user_consents
     FOR EACH ROW EXECUTE FUNCTION public.tg_set_updated_at();
 
 

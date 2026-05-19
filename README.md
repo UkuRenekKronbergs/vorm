@@ -215,7 +215,7 @@ Rakendus on cloud-deploy-valmis. Failisüsteemil ei pea olema kirjeldatud sõltu
    ```
 5. Saad URL-i kujul `https://vorm-ai.streamlit.app`.
 
-Cloud-režiimis vaikimisi andmeallikas on **Käsitsi lisamine** ja see on tühi. Täielik demo töötab ilma isikuandmeteta sidebar'i **Täida demoandmetega** nupu kaudu.
+Cloud-režiimis vaikimisi andmeallikas on **Käsitsi lisamine** ja see on tühi. Täielik demo töötab ilma isikuandmeteta sidebar'i **Täida demoandmetega** nupu kaudu. Külalisrežiim on nüüd ainult demoandmetele: CSV/Strava/Garmin import ja LLM-päringud on külalisel piiratud, et tundlikke treeningu- või terviseandmeid ei töödeldaks ilma nõusolekuta.
 
 ### Cloud-spetsiifika
 
@@ -241,13 +241,15 @@ Vaikimisi käivitub rakendus **anonüümses ühe-kasutaja režiimis** lokaalse S
 - **Parooli taastamine** on login-väravas eraldi tabina olemas. Kasutaja saab taastamislingi emailile, avab lingi ja määrab uue parooli samas Streamlit rakenduses.
 - **Brauseri refresh ei logi välja.** Rakendus hoiab brauseri URL-is ainult juhuslikku sessiooni-ID-d (`?s=...`); Supabase tokenid jäävad serveripoole registrisse ja sessioon taastatakse refresh-tokeniga. Serveri restart/redeploy nõuab uuesti sisselogimist.
 - **Sportlase profiil**, **päevalogi** ja **Strava ühendus** salvestuvad pilve — säilivad redeploy'de vahel, näha igast seadmest. Profiil **salvestub automaatselt** kui väärtusi muudad.
+- **Andmetöötluse nõusolek** — enne pilverežiimis profiili, päevalogi, Strava ühenduse või LLM-ile minevate agregeeritud näitajate kasutamist peab sportlane kinnitama nõusoleku. Treener peab kinnitama, et töötleb sportlase andmeid ainult kokkulepitud eesmärgil.
 - **Row-Level Security** — iga kasutaja näeb ainult enda andmeid; PostgreSQL võtab vastutuse, mitte rakenduse-kood.
+- **Treeneriga jagamine** — kutsekood ei ole ise nõusolek. Sportlane peab kutsekoodi sisestamisel eraldi kinnitama, et treener võib näha profiili, päevalogi, subjektiivseid sisendeid ja tuletatud koormusnäitajaid. Vanad treeneri lingid ilma `athlete_consent_at` ajatemplita ei anna treenerile tundlikele ridadele ligipääsu.
 - **Strava-vahemälu** jääb endiselt lokaalseks SQLite'iks, aga cache-fail on kasutaja/ühenduse järgi eristatud.
 
 ### Seadistamine
 
 1. **Loo projekt** [supabase.com/dashboard](https://supabase.com/dashboard) → New project (tasuta tier: 500 MB DB, 50 000 kuist kasutajat).
-2. **Loo skeem** — Dashboard → SQL Editor → New query → kleebi [`docs/supabase_schema.sql`](docs/supabase_schema.sql) → Run. Loob tabelid `athlete_profiles` + `daily_logs` koos RLS-poliitikatega.
+2. **Loo skeem** — Dashboard → SQL Editor → New query → kleebi [`docs/supabase_schema.sql`](docs/supabase_schema.sql) → Run. Loob tabelid `user_consents`, `athlete_profiles`, `daily_logs`, `coach_athlete_links` jm koos RLS-poliitikatega.
 3. **Võta võtmed** — Settings → API → kopeeri `Project URL` ja `anon` / `publishable` võti. **Ära kasuta** `service_role` / `secret` võtit — see läbib RLS-i ja on admin-võti, mida rakendus ei vaja.
 4. **Confirm email** — Authentication → Sign In / Providers → Email → veendu, et **"Confirm email" on ON** (vaikimisi nii). Nii saab kasutaja esmaregistreerumisel kinnitusmaili; pärast kinnitamist piisab edaspidi ainult email + parool.
 5. **Email template eesti keelde** — Authentication → Email Templates → "Confirm signup" ja "Reset password". Valmis mallid on failis [`docs/supabase_auth_email_templates.md`](docs/supabase_auth_email_templates.md); Management API payload on failis [`docs/supabase_auth_email_templates.json`](docs/supabase_auth_email_templates.json). Uutele kasutajatele läheb signup metadata sisse `language = "et"`, nii et sama template'i saab hiljem mitmekeelseks teha.
@@ -268,7 +270,8 @@ Eemalda `SUPABASE_URL` ja `SUPABASE_ANON_KEY` env-ist või Streamlit secrets'ist
 
 - Treeningandmed (GPS-punktid, tooraine pulsiribaread) **ei** liigu LLM-pakkuja serverisse — LLM näeb ainult agregeeritud näitajaid ja metaandmeid.
 - Strava ühendus hoitakse lokaalses SQLite'is või Supabase multi-user režiimis kasutaja enda `strava_connections` reas. `.env` / Streamlit secrets voog töötab endiselt admin-seadistusena, aga võtmeid ei tohi commit'ida.
-- **Multi-user režiimis** (Supabase) — profiil, päevalogi ja Strava ühendus salvestuvad pilve, Row-Level Security tagab, et iga kasutaja näeb ainult enda andmeid. Anon-võti on disainilt avalik (kaitstud RLS-iga); `service_role` võtit rakendus ei kasuta.
+- **Multi-user režiimis** (Supabase) — profiil, päevalogi ja Strava ühendus salvestuvad pilve alles pärast nõusoleku vormi. Row-Level Security tagab, et iga kasutaja näeb ainult enda andmeid. Anon-võti on disainilt avalik (kaitstud RLS-iga); `service_role` võtit rakendus ei kasuta.
+- **Treeneri ligipääs** tekib ainult sportlase eraldi jagamisnõusoleku korral. Andmed võivad võimaldada järeldusi tervise, taastumise, pohmaka või menstruaaltsükli kohta, seega ei piisa sellest, et “teine kasutaja ei näe”: ka treeneril või projekti haldajal peab töötlemiseks olema õiguslik alus.
 
 ## Vastutuspiir
 
