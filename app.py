@@ -104,6 +104,11 @@ _STRAVA_AUTH_STATE_KEY = "_vorm_strava_auth_state"
 _STRAVA_DISABLE_ENV_KEY = "_vorm_strava_disable_env_connection"
 _STRAVA_PENDING_TTL_SECONDS = 15 * 60
 _STRAVA_CALLBACK_KEYS = ("code", "scope", "state", "error", "error_description")
+_RETRO_NO_TEST_DAY_PLAN = (
+    "Retrospektiivne test: valitud päeva tegelikku treeningut ega etteantud plaani "
+    "ei avaldata. Anna soovitus ainult enne seda päeva teada olnud koormusajaloo "
+    "põhjal."
+)
 
 
 @st.cache_resource
@@ -429,7 +434,9 @@ def _profile_context_key(profile: AthleteProfile) -> tuple:
     )
 
 
-def _subjective_context_key(subjective: DailySubjective) -> tuple:
+def _subjective_context_key(subjective: DailySubjective | None) -> tuple:
+    if subjective is None:
+        return (None, None, None, None, None)
     return (
         subjective.rpe_yesterday,
         subjective.sleep_hours,
@@ -444,7 +451,7 @@ def _evaluation_context_key(
     data_context_key: tuple[str, bool, int, str],
     profile: AthleteProfile,
     today_plan: str,
-    subjective: DailySubjective,
+    subjective: DailySubjective | None,
     analysis_date: date,
 ) -> tuple:
     """Inputs that make an already-rendered recommendation stale when changed."""
@@ -542,6 +549,27 @@ def _render_verdict_box(verdict, llm_result=None):
         if llm_result.input_tokens:
             meta += f" · input tokens: {llm_result.input_tokens} · output tokens: {llm_result.output_tokens}"
         st.caption(meta)
+
+
+def _render_llm_diagnostics(prompt_text: str | None, llm_result=None) -> None:
+    """Show the exact prompt/response pair used for audit and debugging."""
+    if not prompt_text and not llm_result:
+        return
+
+    with st.expander("Näita LLM-i kasutatud prompti ja vastust (diagnostika)"):
+        if prompt_text:
+            st.markdown("**Prompt**")
+            st.code(prompt_text, language="markdown")
+        if llm_result:
+            st.markdown("**Toores LLM-vastus**")
+            st.code(llm_result.raw_text, language="json")
+            if llm_result.acknowledges_safety_flags:
+                st.caption(
+                    "LLM märkis ohutuslipud: "
+                    + ", ".join(llm_result.acknowledges_safety_flags)
+                )
+        else:
+            st.caption("LLM-vastust pole selles jooksus olemas; kuvame ainult koostatud prompti.")
 
 
 def _render_coach_decision_card(decision: CoachDecision) -> None:
@@ -1289,9 +1317,7 @@ with tab1:
         and eval_state.get("evaluation_context_key") == evaluation_context_key
     ):
         _render_verdict_box(eval_state["verdict"], eval_state["llm_result"])
-
-        with st.expander("Näita LLM-i kasutatud prompti (diagnostika)"):
-            st.code(eval_state["prompt_text"], language="markdown")
+        _render_llm_diagnostics(eval_state["prompt_text"], eval_state["llm_result"])
 
         st.divider()
         _render_daily_log_form(
@@ -1459,47 +1485,72 @@ with tab4:
                 max_value=latest,
                 key="retro_date",
             )
-            retro_plan = st.text_input(
-                "Mida sa sel päeval tegid (või pidid tegema)?",
-                placeholder="Nt: 5x1000m @ 3:25",
-                key="retro_plan",
+            st.caption(
+                "Valitud päeva treeningut või plaani ei sisestata ega saadeta LLM-ile. "
+                "Hinnang simuleerib seisu enne seda päeva: kasutada tohib ainult varasemat "
+                "treeningajalugu. Kui varasemates logides on RPE olemas, jääb see ajaloo osana alles."
             )
-            retro_rpe = st.slider("Eilse treeningu RPE", 1, 10, 5, key="retro_rpe")
+            retro_subjective = None
+            retro_context_key = _evaluation_context_key(
+                data_context_key=data_context_key,
+                profile=profile,
+                today_plan=_RETRO_NO_TEST_DAY_PLAN,
+                subjective=retro_subjective,
+                analysis_date=retro_date,
+            )
 
             if st.button("Käivita retrospektiivne hindamine"):
-                past_activities = [a for a in activities if a.activity_date <= retro_date]
+                past_activities = [a for a in activities if a.activity_date < retro_date]
                 retro_summary = summarize_load(past_activities, profile, as_of=retro_date)
-                retro_subjective = DailySubjective(
-                    entry_date=retro_date,
-                    rpe_yesterday=retro_rpe,
-                )
                 retro_verdict = evaluate_safety_rules(retro_summary, retro_subjective)
+                retro_prompt = build_prompt(
+                    profile=profile,
+                    activities=past_activities,
+                    summary=retro_summary,
+                    verdict=retro_verdict,
+                    today_plan=_RETRO_NO_TEST_DAY_PLAN,
+                    subjective=retro_subjective,
+                    today=retro_date,
+                )
 
-                st.markdown(f"#### Seis {retro_date.isoformat()} kohta")
+                retro_llm = None
+                if cfg.has_llm:
+                    with st.spinner("LLM retrospektiivne hinnang..."):
+                        try:
+                            retro_llm = generate_recommendation(retro_prompt, cfg)
+                        except LLMNotAvailable as exc:
+                            st.warning(f"LLM kättesaamatu: {exc}. Näitan reeglipõhist vastust.")
+                        except Exception as exc:
+                            st.error(f"LLM viga: {exc}")
+                else:
+                    st.warning("LLM pole seadistatud — näitan reeglipõhist vastust ja prompti.")
+
+                st.session_state["last_retrospective_evaluation"] = {
+                    "evaluation_context_key": retro_context_key,
+                    "retro_date": retro_date,
+                    "summary": retro_summary,
+                    "verdict": retro_verdict,
+                    "llm_result": retro_llm,
+                    "prompt_text": retro_prompt.user,
+                }
+
+            retro_state = st.session_state.get("last_retrospective_evaluation")
+            if (
+                retro_state
+                and retro_state.get("evaluation_context_key") == retro_context_key
+            ):
+                retro_summary = retro_state["summary"]
+                retro_verdict = retro_state["verdict"]
+                retro_llm = retro_state["llm_result"]
+
+                st.markdown(f"#### Seis {retro_state['retro_date'].isoformat()} hommikul")
                 col_a, col_b, col_c = st.columns(3)
                 col_a.metric("ACWR", f"{retro_summary.acwr:.2f}" if retro_summary.acwr else "—")
                 col_b.metric("7 p TRIMP", f"{retro_summary.acute_7d:.0f}")
                 col_c.metric("28 p TRIMP", f"{retro_summary.chronic_28d:.0f}")
-
-                retro_llm = None
-                if cfg.has_llm and retro_plan.strip():
-                    retro_prompt = build_prompt(
-                        profile=profile,
-                        activities=past_activities,
-                        summary=retro_summary,
-                        verdict=retro_verdict,
-                        today_plan=retro_plan,
-                        subjective=retro_subjective,
-                        today=retro_date,
-                    )
-                    with st.spinner("LLM retrospektiivne hinnang..."):
-                        try:
-                            retro_llm = generate_recommendation(retro_prompt, cfg)
-                        except Exception as exc:
-                            st.error(f"LLM viga: {exc}")
-
                 _render_safety_flags(retro_verdict)
                 _render_verdict_box(retro_verdict, retro_llm)
+                _render_llm_diagnostics(retro_state["prompt_text"], retro_llm)
 
 # --- Tab 5: training plan generator
 with tab5:
