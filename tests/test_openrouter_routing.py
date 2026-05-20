@@ -3,8 +3,8 @@ from __future__ import annotations
 from vorm.config import (
     DEFAULT_OPENROUTER_FALLBACK_MODELS,
     Config,
-    openrouter_fallback_models_after,
     openrouter_extra_body,
+    openrouter_fallback_models_after,
 )
 
 
