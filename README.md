@@ -41,8 +41,10 @@ pip install -e .                    # registreerib `vorm` paketi Pythoni teele
 cp .env.example .env
 # Sisesta üks järgmistest: ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY.
 # Provideri valimiseks sea LLM_PROVIDER=anthropic|openai|openrouter (vaikimisi: anthropic).
-# Mudeli valimiseks sea LLM_MODEL (nt openrouter puhul: anthropic/claude-sonnet-4.6,
-# deepseek/deepseek-v4-flash, meta-llama/llama-3.3-70b-instruct jne).
+# OpenRouteri vaikimisi järjekord:
+# deepseek/deepseek-v4-flash:free -> nvidia/nemotron-3-super-120b-a12b:free
+# -> google/gemma-4-31b-it:free.
+# OpenRouteri puhul saab sama kolme mudeli vahel valida ka rakenduse sidebar'is.
 
 # 4. Käivita
 streamlit run app.py
@@ -194,6 +196,7 @@ Rakendus on cloud-deploy-valmis. Failisüsteemil ei pea olema kirjeldatud sõltu
    ```toml
    LLM_PROVIDER = "openrouter"
    LLM_MODEL = "deepseek/deepseek-v4-flash:free"
+   OPENROUTER_FALLBACK_MODELS = "nvidia/nemotron-3-super-120b-a12b:free,google/gemma-4-31b-it:free"
    LLM_TEMPERATURE = "0"
    OPENROUTER_API_KEY = "sk-or-v1-..."   # https://openrouter.ai/keys
    # Alternatiivid (kontrollitud 2026-05 seisuga):

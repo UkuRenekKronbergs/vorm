@@ -26,7 +26,13 @@ import pandas as pd
 import streamlit as st
 
 from vorm import auth
-from vorm.config import CACHE_DIR, load_config
+from vorm.config import (
+    CACHE_DIR,
+    OPENROUTER_MODEL_IDS,
+    OPENROUTER_MODEL_OPTIONS,
+    load_config,
+    openrouter_fallback_models_after,
+)
 from vorm.data import (
     AthleteProfile,
     DailySubjective,
@@ -98,6 +104,7 @@ _SOURCE_STRAVA = "Strava API"
 _SOURCE_GARMIN = "Garmin GPX-kaust"
 _DEMO_DATA_KEY = "_vorm_demo_data_enabled"
 _DATA_SOURCE_KEY = "_vorm_data_source"
+_LLM_MODEL_KEY = "_vorm_llm_model"
 _STRAVA_CONNECTION_KEY = "_vorm_strava_connection"
 _STRAVA_AUTH_URL_KEY = "_vorm_strava_auth_url"
 _STRAVA_AUTH_STATE_KEY = "_vorm_strava_auth_state"
@@ -420,6 +427,37 @@ def _activity_context_key(
     return source, bool(use_demo_data), len(activities), digest.hexdigest()
 
 
+def _render_llm_model_selector(cfg):
+    if cfg.llm_provider != "openrouter":
+        return cfg
+
+    labels = dict(OPENROUTER_MODEL_OPTIONS)
+    options = list(OPENROUTER_MODEL_IDS)
+    if cfg.llm_model not in options:
+        options.insert(0, cfg.llm_model)
+        labels[cfg.llm_model] = f"Keskkonnast: {cfg.llm_model}"
+
+    if st.session_state.get(_LLM_MODEL_KEY) not in options:
+        st.session_state[_LLM_MODEL_KEY] = cfg.llm_model
+
+    selected_model = st.sidebar.selectbox(
+        "LLM mudel",
+        options,
+        key=_LLM_MODEL_KEY,
+        format_func=lambda model_id: labels.get(model_id, model_id),
+        help=(
+            "Valib OpenRouteri esmase mudeli. Kui valitud mudel pole saadaval, "
+            "proovitakse nimekirjas sellest järgmisi mudeleid."
+        ),
+    )
+
+    return replace(
+        cfg,
+        llm_model=selected_model,
+        openrouter_fallback_models=openrouter_fallback_models_after(selected_model),
+    )
+
+
 def _profile_context_key(profile: AthleteProfile) -> tuple:
     return (
         profile.name,
@@ -453,11 +491,15 @@ def _evaluation_context_key(
     today_plan: str,
     subjective: DailySubjective | None,
     analysis_date: date,
+    llm_provider: str,
+    llm_model: str,
 ) -> tuple:
     """Inputs that make an already-rendered recommendation stale when changed."""
     return (
         data_context_key,
         analysis_date.isoformat(),
+        llm_provider,
+        llm_model,
         _profile_context_key(profile),
         today_plan.strip(),
         _subjective_context_key(subjective),
@@ -1142,6 +1184,9 @@ analysis_date: date = st.sidebar.date_input(
 )
 
 st.sidebar.divider()
+if not auth.is_guest():
+    cfg = _render_llm_model_selector(cfg)
+
 if auth.is_guest():
     st.sidebar.info(
         "LLM on külalisrežiimis välja lülitatud — kasuta ainult demoandmeid."
@@ -1313,6 +1358,8 @@ with tab1:
         today_plan=today_plan,
         subjective=subjective,
         analysis_date=analysis_date,
+        llm_provider=cfg.llm_provider,
+        llm_model=cfg.llm_model,
     )
 
     st.divider()
@@ -1544,6 +1591,8 @@ with tab4:
                 today_plan=_RETRO_NO_TEST_DAY_PLAN,
                 subjective=retro_subjective,
                 analysis_date=retro_date,
+                llm_provider=cfg.llm_provider,
+                llm_model=cfg.llm_model,
             )
 
             if st.button("Käivita retrospektiivne hindamine"):

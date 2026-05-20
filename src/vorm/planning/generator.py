@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from ..config import OPENROUTER_BASE_URL, Config
+from ..config import OPENROUTER_BASE_URL, Config, openrouter_extra_body
 from ..data.models import AthleteProfile
 from ..llm._json_utils import extract_json_object
 from ..llm.client import LLMNotAvailable
@@ -135,6 +135,10 @@ def _call_openai_compatible(system: str, user: str, config: Config) -> str:
     # when given response_format.
     if config.llm_provider == "openai":
         create_kwargs["response_format"] = {"type": "json_object"}
+    if config.llm_provider == "openrouter":
+        extra_body = openrouter_extra_body(config)
+        if extra_body:
+            create_kwargs["extra_body"] = extra_body
 
     resp = client.chat.completions.create(**create_kwargs)
     return resp.choices[0].message.content or ""

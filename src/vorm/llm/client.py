@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..config import OPENROUTER_BASE_URL, Config
+from ..config import OPENROUTER_BASE_URL, Config, openrouter_extra_body
 from ._json_utils import extract_json_object
 from .prompts import PromptBundle
 
@@ -169,21 +169,25 @@ def _generate_openrouter(prompt: PromptBundle, config: Config) -> LLMRecommendat
     # prompt already instructs JSON-only output and _parse_json_with_retry
     # retries once on parse failure — that combo beats getting a hard 400 from
     # a model that doesn't speak OpenAI JSON mode.
-    response = client.chat.completions.create(
-        model=config.llm_model,
-        temperature=config.llm_temperature,
-        messages=[
+    create_kwargs: dict = {
+        "model": config.llm_model,
+        "temperature": config.llm_temperature,
+        "messages": [
             {"role": "system", "content": prompt.system},
             {"role": "user", "content": prompt.user},
         ],
-    )
+    }
+    extra_body = openrouter_extra_body(config)
+    if extra_body:
+        create_kwargs["extra_body"] = extra_body
+    response = client.chat.completions.create(**create_kwargs)
     text = response.choices[0].message.content or ""
 
     def _retry(prompt: PromptBundle, config: Config, error: str) -> str:
-        retry = client.chat.completions.create(
-            model=config.llm_model,
-            temperature=config.llm_temperature,
-            messages=[
+        retry_kwargs: dict = {
+            "model": config.llm_model,
+            "temperature": config.llm_temperature,
+            "messages": [
                 {"role": "system", "content": prompt.system},
                 {"role": "user", "content": prompt.user},
                 {"role": "assistant", "content": "Vabandust, annan kehtiva JSON-i."},
@@ -195,15 +199,19 @@ def _generate_openrouter(prompt: PromptBundle, config: Config) -> LLMRecommendat
                     ),
                 },
             ],
-        )
+        }
+        if extra_body:
+            retry_kwargs["extra_body"] = extra_body
+        retry = client.chat.completions.create(**retry_kwargs)
         return retry.choices[0].message.content or ""
 
     parsed = _parse_json_with_retry(text, client, prompt, config, _retry)
     usage = getattr(response, "usage", None)
+    model = getattr(response, "model", None) or config.llm_model
     return _build_recommendation(
         parsed,
         raw_text=text,
-        model=config.llm_model,
+        model=model,
         prompt_version=prompt.version,
         input_tokens=getattr(usage, "prompt_tokens", None) if usage else None,
         output_tokens=getattr(usage, "completion_tokens", None) if usage else None,

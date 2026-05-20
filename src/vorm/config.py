@@ -46,6 +46,13 @@ USER_DIR = DATA_DIR / "user"
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_MODEL_OPTIONS = (
+    ("deepseek/deepseek-v4-flash:free", "DeepSeek V4 Flash (free)"),
+    ("nvidia/nemotron-3-super-120b-a12b:free", "NVIDIA Nemotron 3 Super (free)"),
+    ("google/gemma-4-31b-it:free", "Google Gemma 4 31B (free)"),
+)
+OPENROUTER_MODEL_IDS = tuple(model_id for model_id, _label in OPENROUTER_MODEL_OPTIONS)
+DEFAULT_OPENROUTER_FALLBACK_MODELS = OPENROUTER_MODEL_IDS[1:]
 
 
 def _from_streamlit_secrets(key: str) -> str | None:
@@ -93,6 +100,7 @@ class Config:
     llm_provider: str
     llm_model: str
     llm_temperature: float
+    openrouter_fallback_models: tuple[str, ...] = DEFAULT_OPENROUTER_FALLBACK_MODELS
 
     @property
     def has_anthropic(self) -> bool:
@@ -141,18 +149,50 @@ class Config:
 _DEFAULT_MODEL_BY_PROVIDER = {
     "anthropic": "claude-sonnet-4-6",
     "openai": "gpt-4o-2024-08-06",
-    # OpenRouter proxies many models — default to Claude via Anthropic's route.
-    # Full catalog: https://openrouter.ai/models
-    "openrouter": "anthropic/claude-sonnet-4.6",
+    # OpenRouter proxies many models. Keep the default on the free primary
+    # route; DEFAULT_OPENROUTER_FALLBACK_MODELS supplies the backup order.
+    "openrouter": "deepseek/deepseek-v4-flash:free",
     # Google AI Studio: free tier 15 RPM, 1500 RPD on Flash-Lite models.
     # Get key from https://aistudio.google.com/app/apikey
     "google": "gemini-3.1-flash-lite",
 }
 
 
+def _parse_csv(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
+def openrouter_fallback_models_after(model_id: str) -> tuple[str, ...]:
+    """Fallback models that come after `model_id` in the in-app OpenRouter list."""
+    if model_id not in OPENROUTER_MODEL_IDS:
+        return DEFAULT_OPENROUTER_FALLBACK_MODELS
+    index = OPENROUTER_MODEL_IDS.index(model_id)
+    return OPENROUTER_MODEL_IDS[index + 1:]
+
+
+def openrouter_extra_body(config: Config) -> dict[str, list[str]]:
+    """OpenRouter-only request body additions.
+
+    The OpenAI SDK passes OpenRouter's model fallback array through
+    `extra_body`. The primary model stays in `model`; this array is tried only
+    if the primary errors, is rate-limited, or is unavailable.
+    """
+    if config.llm_provider != "openrouter":
+        return {}
+    fallbacks = [
+        model
+        for model in config.openrouter_fallback_models
+        if model and model != config.llm_model
+    ]
+    return {"models": fallbacks} if fallbacks else {}
+
+
 def load_config() -> Config:
     provider = (_get("LLM_PROVIDER") or "anthropic").lower()
     default_model = _DEFAULT_MODEL_BY_PROVIDER.get(provider, "claude-sonnet-4-6")
+    llm_model = _get("LLM_MODEL", default_model)
     # Accept either GOOGLE_API_KEY (AI Studio's canonical name) or GEMINI_API_KEY
     # (the genai SDK's auto-pickup name) — both are common in the wild.
     google_key = _get("GOOGLE_API_KEY") or _get("GEMINI_API_KEY")
@@ -167,6 +207,10 @@ def load_config() -> Config:
         supabase_url=_get("SUPABASE_URL") or None,
         supabase_anon_key=_get("SUPABASE_ANON_KEY") or None,
         llm_provider=provider,
-        llm_model=_get("LLM_MODEL", default_model),
+        llm_model=llm_model,
         llm_temperature=float(_get("LLM_TEMPERATURE", "0") or "0"),
+        openrouter_fallback_models=(
+            _parse_csv(_get("OPENROUTER_FALLBACK_MODELS"))
+            or openrouter_fallback_models_after(llm_model)
+        ),
     )
