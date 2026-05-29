@@ -433,12 +433,10 @@ def _render_llm_model_selector(cfg):
 
     labels = dict(OPENROUTER_MODEL_OPTIONS)
     options = list(OPENROUTER_MODEL_IDS)
-    if cfg.llm_model not in options:
-        options.insert(0, cfg.llm_model)
-        labels[cfg.llm_model] = f"Keskkonnast: {cfg.llm_model}"
+    default_model = cfg.llm_model if cfg.llm_model in options else options[0]
 
     if st.session_state.get(_LLM_MODEL_KEY) not in options:
-        st.session_state[_LLM_MODEL_KEY] = cfg.llm_model
+        st.session_state[_LLM_MODEL_KEY] = default_model
 
     selected_model = st.sidebar.selectbox(
         "LLM mudel",
@@ -798,6 +796,7 @@ def _render_strava_connection_panel(
     st.sidebar.caption(
         f"Strava API seadetes peab **Authorization Callback Domain** olema `{callback_domain}`."
     )
+    st.sidebar.markdown("[Ava Strava API seaded](https://www.strava.com/settings/api)")
     with st.sidebar.form("vorm_strava_connect_form"):
         client_id = st.text_input(
             "Client ID",

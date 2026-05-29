@@ -47,7 +47,7 @@ USER_DIR = DATA_DIR / "user"
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MODEL_OPTIONS = (
-    ("deepseek/deepseek-v4-flash:free", "DeepSeek V4 Flash (free)"),
+    ("deepseek/deepseek-v4-flash:free", "Automaatne"),
     ("nvidia/nemotron-3-super-120b-a12b:free", "NVIDIA Nemotron 3 Super (free)"),
     ("google/gemma-4-31b-it:free", "Google Gemma 4 31B (free)"),
 )

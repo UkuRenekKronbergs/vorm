@@ -51,6 +51,7 @@ tokens/
 data/cache/
 data/user/
 data/real_activities.csv
+data/presentation/
 
 # Strava bulk-export ZIPs extracted locally (contain GPS, private notes, HR)
 # Add future user exports here or rename them to end in _Strava_andmed.
