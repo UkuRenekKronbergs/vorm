@@ -46,10 +46,11 @@ USER_DIR = DATA_DIR / "user"
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_DEFAULT_MODEL = "deepseek/deepseek-v4-flash:free"
 OPENROUTER_MODEL_OPTIONS = (
-    ("deepseek/deepseek-v4-flash:free", "Automaatne"),
-    ("nvidia/nemotron-3-super-120b-a12b:free", "NVIDIA Nemotron 3 Super (free)"),
-    ("google/gemma-4-31b-it:free", "Google Gemma 4 31B (free)"),
+    (OPENROUTER_DEFAULT_MODEL, "Deepseek V4 Flash (Free)"),
+    ("google/gemma-4-31b-it:free", "Gemma 4 31B (Free)"),
+    ("nvidia/nemotron-3-super-120b-a12b:free", "Nvidia Nemotron 3 Super (Free)"),
 )
 OPENROUTER_MODEL_IDS = tuple(model_id for model_id, _label in OPENROUTER_MODEL_OPTIONS)
 DEFAULT_OPENROUTER_FALLBACK_MODELS = OPENROUTER_MODEL_IDS[1:]
@@ -151,7 +152,7 @@ _DEFAULT_MODEL_BY_PROVIDER = {
     "openai": "gpt-4o-2024-08-06",
     # OpenRouter proxies many models. Keep the default on the free primary
     # route; DEFAULT_OPENROUTER_FALLBACK_MODELS supplies the backup order.
-    "openrouter": "deepseek/deepseek-v4-flash:free",
+    "openrouter": OPENROUTER_DEFAULT_MODEL,
     # Google AI Studio: free tier 15 RPM, 1500 RPD on Flash-Lite models.
     # Get key from https://aistudio.google.com/app/apikey
     "google": "gemini-3.1-flash-lite",

@@ -28,6 +28,7 @@ import streamlit as st
 from vorm import auth
 from vorm.config import (
     CACHE_DIR,
+    OPENROUTER_DEFAULT_MODEL,
     OPENROUTER_MODEL_IDS,
     OPENROUTER_MODEL_OPTIONS,
     load_config,
@@ -104,7 +105,8 @@ _SOURCE_STRAVA = "Strava API"
 _SOURCE_GARMIN = "Garmin GPX-kaust"
 _DEMO_DATA_KEY = "_vorm_demo_data_enabled"
 _DATA_SOURCE_KEY = "_vorm_data_source"
-_LLM_MODEL_KEY = "_vorm_llm_model"
+_LLM_MODEL_KEY = "_vorm_llm_model_choice"
+_OPENROUTER_AUTO_CHOICE = "__auto__"
 _STRAVA_CONNECTION_KEY = "_vorm_strava_connection"
 _STRAVA_AUTH_URL_KEY = "_vorm_strava_auth_url"
 _STRAVA_AUTH_STATE_KEY = "_vorm_strava_auth_state"
@@ -431,28 +433,46 @@ def _render_llm_model_selector(cfg):
     if cfg.llm_provider != "openrouter":
         return cfg
 
-    labels = dict(OPENROUTER_MODEL_OPTIONS)
-    options = list(OPENROUTER_MODEL_IDS)
-    default_model = cfg.llm_model if cfg.llm_model in options else options[0]
+    model_labels = dict(OPENROUTER_MODEL_OPTIONS)
+    labels = {_OPENROUTER_AUTO_CHOICE: "Automaatne", **model_labels}
+    options = [_OPENROUTER_AUTO_CHOICE, *OPENROUTER_MODEL_IDS]
+    default_choice = _OPENROUTER_AUTO_CHOICE
+    if cfg.llm_model in OPENROUTER_MODEL_IDS and (
+        cfg.llm_model != OPENROUTER_DEFAULT_MODEL or not cfg.openrouter_fallback_models
+    ):
+        default_choice = cfg.llm_model
 
-    if st.session_state.get(_LLM_MODEL_KEY) not in options:
-        st.session_state[_LLM_MODEL_KEY] = default_model
+    if (
+        _LLM_MODEL_KEY in st.session_state
+        and st.session_state[_LLM_MODEL_KEY] not in options
+    ):
+        del st.session_state[_LLM_MODEL_KEY]
 
-    selected_model = st.sidebar.selectbox(
+    selected_choice = st.sidebar.segmented_control(
         "LLM mudel",
         options,
+        default=default_choice,
         key=_LLM_MODEL_KEY,
         format_func=lambda model_id: labels.get(model_id, model_id),
+        width="stretch",
         help=(
-            "Valib OpenRouteri esmase mudeli. Kui valitud mudel pole saadaval, "
-            "proovitakse nimekirjas sellest järgmisi mudeleid."
+            "Automaatne proovib tasuta OpenRouteri mudeleid järjekorras. "
+            "Käsitsi valitud mudeli puhul fallback'i ei kasutata."
         ),
     )
+    selected_choice = selected_choice or _OPENROUTER_AUTO_CHOICE
+
+    if selected_choice == _OPENROUTER_AUTO_CHOICE:
+        selected_model = OPENROUTER_DEFAULT_MODEL
+        fallback_models = openrouter_fallback_models_after(selected_model)
+    else:
+        selected_model = selected_choice
+        fallback_models = ()
 
     return replace(
         cfg,
         llm_model=selected_model,
-        openrouter_fallback_models=openrouter_fallback_models_after(selected_model),
+        openrouter_fallback_models=fallback_models,
     )
 
 
@@ -1191,7 +1211,13 @@ if auth.is_guest():
         "LLM on külalisrežiimis välja lülitatud — kasuta ainult demoandmeid."
     )
 elif cfg.has_llm:
-    st.sidebar.success(f"LLM aktiivne: {cfg.llm_provider} / {cfg.llm_model}")
+    llm_display_model = cfg.llm_model
+    if (
+        cfg.llm_provider == "openrouter"
+        and st.session_state.get(_LLM_MODEL_KEY) == _OPENROUTER_AUTO_CHOICE
+    ):
+        llm_display_model = f"Automaatne ({cfg.llm_model})"
+    st.sidebar.success(f"LLM aktiivne: {cfg.llm_provider} / {llm_display_model}")
 else:
     st.sidebar.info("LLM pole seadistatud — reeglivastus kuvatakse. Lisa ANTHROPIC_API_KEY .env-i täieliku analüüsi jaoks.")
 
