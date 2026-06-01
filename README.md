@@ -42,9 +42,9 @@ cp .env.example .env
 # Sisesta üks järgmistest: ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY.
 # Provideri valimiseks sea LLM_PROVIDER=anthropic|openai|openrouter (vaikimisi: anthropic).
 # OpenRouteri vaikimisi järjekord:
-# deepseek/deepseek-v4-flash:free -> nvidia/nemotron-3-super-120b-a12b:free
-# -> google/gemma-4-31b-it:free.
-# OpenRouteri puhul saab sama kolme mudeli vahel valida ka rakenduse sidebar'is.
+# google/gemma-4-31b-it:free -> nvidia/nemotron-3-super-120b-a12b:free.
+# Deepseek V4 Flash on OpenRouteris tasuline mudel: deepseek/deepseek-v4-flash.
+# OpenRouteri puhul saab sidebar'is valida: Automaatne, Deepseek, Gemma või Nemotron.
 
 # 4. Käivita
 streamlit run app.py
@@ -192,11 +192,11 @@ Rakendus on cloud-deploy-valmis. Failisüsteemil ei pea olema kirjeldatud sõltu
 1. **Logi sisse** [share.streamlit.io](https://share.streamlit.io) GitHubi kaudu.
 2. **Deploy app** → repo: `UkuRenekKronbergs/vorm`, branch: `main`, main file: `app.py`.
 3. **Advanced settings → Python version:** vali `3.13` (matches [`runtime.txt`](runtime.txt)).
-4. **App settings → Secrets** — kleebi TOML-vormingus (näide OpenRouteri tasuta DeepSeek V4 Flash-iga, 1M context):
+4. **App settings → Secrets** — kleebi TOML-vormingus (näide OpenRouteri tasuta Gemma + Nemotron fallback'iga):
    ```toml
    LLM_PROVIDER = "openrouter"
-   LLM_MODEL = "deepseek/deepseek-v4-flash:free"
-   OPENROUTER_FALLBACK_MODELS = "nvidia/nemotron-3-super-120b-a12b:free,google/gemma-4-31b-it:free"
+   LLM_MODEL = "google/gemma-4-31b-it:free"
+   OPENROUTER_FALLBACK_MODELS = "nvidia/nemotron-3-super-120b-a12b:free"
    LLM_TEMPERATURE = "0"
    OPENROUTER_API_KEY = "sk-or-v1-..."   # https://openrouter.ai/keys
    # Alternatiivid (kontrollitud 2026-05 seisuga):

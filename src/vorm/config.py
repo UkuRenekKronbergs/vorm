@@ -46,14 +46,23 @@ USER_DIR = DATA_DIR / "user"
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_DEFAULT_MODEL = "deepseek/deepseek-v4-flash:free"
+OPENROUTER_DEFAULT_MODEL = "google/gemma-4-31b-it:free"
+OPENROUTER_DEEPSEEK_V4_FLASH_MODEL = "deepseek/deepseek-v4-flash"
+OPENROUTER_NEMOTRON_SUPER_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 OPENROUTER_MODEL_OPTIONS = (
-    (OPENROUTER_DEFAULT_MODEL, "Deepseek V4 Flash (Free)"),
+    (OPENROUTER_DEEPSEEK_V4_FLASH_MODEL, "Deepseek V4 Flash (Paid)"),
     ("google/gemma-4-31b-it:free", "Gemma 4 31B (Free)"),
-    ("nvidia/nemotron-3-super-120b-a12b:free", "Nvidia Nemotron 3 Super (Free)"),
+    (OPENROUTER_NEMOTRON_SUPER_MODEL, "Nvidia Nemotron 3 Super (Free)"),
 )
 OPENROUTER_MODEL_IDS = tuple(model_id for model_id, _label in OPENROUTER_MODEL_OPTIONS)
-DEFAULT_OPENROUTER_FALLBACK_MODELS = OPENROUTER_MODEL_IDS[1:]
+OPENROUTER_FREE_MODEL_IDS = (
+    OPENROUTER_DEFAULT_MODEL,
+    OPENROUTER_NEMOTRON_SUPER_MODEL,
+)
+DEFAULT_OPENROUTER_FALLBACK_MODELS = OPENROUTER_FREE_MODEL_IDS[1:]
+DEPRECATED_OPENROUTER_MODEL_REPLACEMENTS = {
+    "deepseek/deepseek-v4-flash:free": OPENROUTER_DEFAULT_MODEL,
+}
 
 
 def _from_streamlit_secrets(key: str) -> str | None:
@@ -165,12 +174,28 @@ def _parse_csv(value: str | None) -> tuple[str, ...]:
     return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
+def normalize_openrouter_model_id(model_id: str) -> str:
+    return DEPRECATED_OPENROUTER_MODEL_REPLACEMENTS.get(model_id.strip(), model_id.strip())
+
+
+def _normalize_openrouter_model_ids(model_ids: tuple[str, ...]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for model_id in model_ids:
+        normalized_model = normalize_openrouter_model_id(model_id)
+        if normalized_model and normalized_model not in normalized:
+            normalized.append(normalized_model)
+    return tuple(normalized)
+
+
 def openrouter_fallback_models_after(model_id: str) -> tuple[str, ...]:
-    """Fallback models that come after `model_id` in the in-app OpenRouter list."""
-    if model_id not in OPENROUTER_MODEL_IDS:
+    """Free fallback models that come after `model_id` in the automatic route."""
+    model_id = normalize_openrouter_model_id(model_id)
+    if model_id not in OPENROUTER_FREE_MODEL_IDS:
+        if model_id in OPENROUTER_MODEL_IDS:
+            return OPENROUTER_FREE_MODEL_IDS
         return DEFAULT_OPENROUTER_FALLBACK_MODELS
-    index = OPENROUTER_MODEL_IDS.index(model_id)
-    return OPENROUTER_MODEL_IDS[index + 1:]
+    index = OPENROUTER_FREE_MODEL_IDS.index(model_id)
+    return OPENROUTER_FREE_MODEL_IDS[index + 1:]
 
 
 def openrouter_extra_body(config: Config) -> dict[str, list[str]]:
@@ -194,6 +219,12 @@ def load_config() -> Config:
     provider = (_get("LLM_PROVIDER") or "anthropic").lower()
     default_model = _DEFAULT_MODEL_BY_PROVIDER.get(provider, "claude-sonnet-4-6")
     llm_model = _get("LLM_MODEL", default_model)
+    openrouter_fallback_models = _parse_csv(_get("OPENROUTER_FALLBACK_MODELS"))
+    if provider == "openrouter":
+        llm_model = normalize_openrouter_model_id(llm_model)
+        openrouter_fallback_models = _normalize_openrouter_model_ids(
+            openrouter_fallback_models
+        )
     # Accept either GOOGLE_API_KEY (AI Studio's canonical name) or GEMINI_API_KEY
     # (the genai SDK's auto-pickup name) — both are common in the wild.
     google_key = _get("GOOGLE_API_KEY") or _get("GEMINI_API_KEY")
@@ -211,7 +242,6 @@ def load_config() -> Config:
         llm_model=llm_model,
         llm_temperature=float(_get("LLM_TEMPERATURE", "0") or "0"),
         openrouter_fallback_models=(
-            _parse_csv(_get("OPENROUTER_FALLBACK_MODELS"))
-            or openrouter_fallback_models_after(llm_model)
+            openrouter_fallback_models or openrouter_fallback_models_after(llm_model)
         ),
     )

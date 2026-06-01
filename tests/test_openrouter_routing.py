@@ -3,6 +3,7 @@ from __future__ import annotations
 from vorm.config import (
     DEFAULT_OPENROUTER_FALLBACK_MODELS,
     Config,
+    normalize_openrouter_model_id,
     openrouter_extra_body,
     openrouter_fallback_models_after,
 )
@@ -11,7 +12,7 @@ from vorm.config import (
 def _config(
     *,
     provider: str = "openrouter",
-    model: str = "deepseek/deepseek-v4-flash:free",
+    model: str = "google/gemma-4-31b-it:free",
     fallbacks: tuple[str, ...] = DEFAULT_OPENROUTER_FALLBACK_MODELS,
 ) -> Config:
     return Config(
@@ -33,17 +34,14 @@ def _config(
 
 def test_openrouter_extra_body_routes_to_requested_free_fallbacks() -> None:
     assert openrouter_extra_body(_config()) == {
-        "models": [
-            "google/gemma-4-31b-it:free",
-            "nvidia/nemotron-3-super-120b-a12b:free",
-        ]
+        "models": ["nvidia/nemotron-3-super-120b-a12b:free"]
     }
 
 
 def test_openrouter_extra_body_skips_duplicate_primary_model() -> None:
     assert openrouter_extra_body(
-        _config(model="google/gemma-4-31b-it:free")
-    ) == {"models": ["nvidia/nemotron-3-super-120b-a12b:free"]}
+        _config(model="nvidia/nemotron-3-super-120b-a12b:free")
+    ) == {}
 
 
 def test_openrouter_extra_body_is_empty_for_other_providers() -> None:
@@ -51,7 +49,7 @@ def test_openrouter_extra_body_is_empty_for_other_providers() -> None:
 
 
 def test_openrouter_fallback_models_follow_in_app_model_order() -> None:
-    assert openrouter_fallback_models_after("deepseek/deepseek-v4-flash:free") == (
+    assert openrouter_fallback_models_after("deepseek/deepseek-v4-flash") == (
         "google/gemma-4-31b-it:free",
         "nvidia/nemotron-3-super-120b-a12b:free",
     )
@@ -59,3 +57,10 @@ def test_openrouter_fallback_models_follow_in_app_model_order() -> None:
         "nvidia/nemotron-3-super-120b-a12b:free",
     )
     assert openrouter_fallback_models_after("nvidia/nemotron-3-super-120b-a12b:free") == ()
+
+
+def test_deprecated_openrouter_free_deepseek_slug_maps_to_free_default() -> None:
+    assert (
+        normalize_openrouter_model_id("deepseek/deepseek-v4-flash:free")
+        == "google/gemma-4-31b-it:free"
+    )
